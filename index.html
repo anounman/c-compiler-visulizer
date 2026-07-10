@@ -1,0 +1,561 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>C Editor</title>
+<style>
+  :root {
+    --bg:#1e1e1e; --panel:#252526; --border:#3c3c3c; --fg:#d4d4d4;
+    --accent:#0e639c; --err:#f14c4c; --warn:#cca700; --cur:#264f78;
+    --mono:"SF Mono",Menlo,Consolas,monospace;
+  }
+  * { box-sizing:border-box; margin:0; }
+  body { background:var(--bg); color:var(--fg); font:13px/1.4 -apple-system,sans-serif;
+         height:100vh; display:flex; flex-direction:column; overflow:hidden; }
+
+  /* toolbar */
+  #bar { display:flex; align-items:center; gap:8px; padding:6px 10px;
+         background:var(--panel); border-bottom:1px solid var(--border); }
+  #bar b { margin-right:8px; font-size:14px; }
+  button { background:var(--accent); color:#fff; border:0; border-radius:4px;
+           padding:5px 12px; font-size:12px; cursor:pointer; }
+  button.sec { background:#3a3d41; }
+  button:disabled { opacity:.5; cursor:default; }
+  #status { margin-left:auto; font-size:12px; color:#9d9d9d; }
+
+  /* layout */
+  #main { flex:1; display:flex; min-height:0; }
+  #left { flex:1.2; display:flex; min-width:0; border-right:1px solid var(--border); }
+  #right { flex:1; display:flex; flex-direction:column; min-width:0; }
+
+  /* editor */
+  #gutter { width:48px; padding:8px 0; background:var(--panel); overflow:hidden;
+            text-align:right; font:13px/20px var(--mono); color:#6e7681; flex:none; }
+  #gutter div { padding-right:10px; height:20px; cursor:pointer; position:relative; }
+  #gutter div:hover { color:#d4d4d4; }
+  #gutter .err { color:var(--err); font-weight:700; }
+  #gutter .warn { color:var(--warn); }
+  #gutter .bpdot { position:absolute; left:4px; color:#e51400; }
+  #wrap { position:relative; flex:1; min-width:0; }
+  #overlay, #code {
+    font:13px/20px var(--mono); padding:8px; white-space:pre; tab-size:4;
+  }
+  #overlay { position:absolute; inset:0; overflow:hidden; pointer-events:none; }
+  #overlay .ln { height:20px; }
+  #overlay .msg { font-style:italic; font-size:12px; padding-left:24px; }
+  /* syntax colors — overlay paints the code, textarea only paints the caret */
+  .tk-kw { color:#c586c0; } .tk-ty { color:#569cd6; } .tk-st { color:#ce9178; }
+  .tk-cm { color:#6a9955; } .tk-nu { color:#b5cea8; } .tk-pp { color:#9cdcfe; }
+  #overlay .ln.err { background:rgba(241,76,76,.14); }
+  #overlay .ln.err .msg { color:var(--err); }
+  #overlay .ln.warn { background:rgba(204,167,0,.10); }
+  #overlay .ln.warn .msg { color:var(--warn); }
+  #overlay .ln.cur { background:var(--cur); outline:1px solid #3794ff; }
+  #code { position:absolute; inset:0; width:100%; height:100%; resize:none;
+          background:transparent; color:transparent; caret-color:#fff;
+          border:0; outline:none; overflow:auto; }
+  #code::selection { background:rgba(38,79,120,.9); color:transparent; }
+
+  /* right tabs */
+  #tabs { display:flex; background:var(--panel); border-bottom:1px solid var(--border); }
+  #tabs div { padding:7px 16px; cursor:pointer; font-size:12px; color:#9d9d9d; }
+  #tabs div.on { color:#fff; border-bottom:2px solid var(--accent); }
+  .pane { flex:1; overflow:auto; display:none; min-height:0; }
+  .pane.on { display:flex; flex-direction:column; }
+
+  /* output pane */
+  #stdin { background:var(--bg); color:var(--fg); border:1px solid var(--border);
+           border-radius:4px; font:12px var(--mono); padding:6px; width:100%;
+           height:52px; resize:vertical; }
+  #outpane { padding:10px; gap:8px; }
+  #output { flex:1; background:#111; border-radius:4px; padding:10px;
+            font:12px/1.5 var(--mono); white-space:pre-wrap; overflow:auto; }
+  #output .stderr { color:var(--err); }
+  #output .meta { color:#6e7681; }
+  label { font-size:11px; color:#9d9d9d; }
+
+  /* memory pane */
+  #mempane { padding:10px; gap:8px; }
+  #vizctl { display:flex; align-items:center; gap:8px; }
+  #vizctl input[type=range] { flex:1; }
+  #stepinfo { font:12px var(--mono); color:#9d9d9d; white-space:nowrap; }
+  #crash { display:none; background:rgba(241,76,76,.15); border:1px solid var(--err);
+           color:var(--err); border-radius:4px; padding:6px 10px; font:12px var(--mono); }
+  #vizout { background:#111; border-radius:4px; padding:8px 10px;
+            font:12px/1.5 var(--mono); white-space:pre-wrap; max-height:110px;
+            overflow:auto; flex:none; }
+  #mem { position:relative; flex:1; overflow:auto; }
+  #arrows { position:absolute; inset:0; pointer-events:none; overflow:visible; }
+  .frame { border:1px solid var(--border); border-radius:6px; margin-bottom:10px;
+           background:var(--panel); }
+  .frame.top { border-color:#3794ff; }
+  .fhead { padding:5px 10px; font:12px var(--mono); color:#3794ff;
+           border-bottom:1px solid var(--border); }
+  .fvars { display:flex; flex-wrap:wrap; gap:8px; padding:10px; }
+  .vbox { border:1px solid #4d4d4d; border-radius:5px; padding:6px 9px;
+          background:#2d2d30; min-width:90px; }
+  .vbox .vn { font:600 12px var(--mono); }
+  .vbox .vt { font-size:10px; color:#9d9d9d; }
+  .vbox .vv { font:14px var(--mono); color:#b5cea8; margin-top:2px; }
+  .vbox .va { font:10px var(--mono); color:#6e7681; margin-top:2px; }
+  .vbox.changed { border-color:#b5cea8; box-shadow:0 0 6px rgba(181,206,168,.35); }
+  .mgrid { border-collapse:collapse; margin-top:4px; }
+  .mgrid td { border:1px solid #4d4d4d; padding:2px 7px; font:12px var(--mono);
+              text-align:right; color:#b5cea8; min-width:26px; }
+  .mgrid td.idx { border:0; color:#6e7681; font-size:9px; text-align:center; padding:1px 4px; }
+  td.chg, .hf.chg, .vbox.chg .vv { background:rgba(229,192,123,.22) !important;
+              outline:1px solid #e5c07b; color:#e5c07b; }
+  #memhint { color:#6e7681; font-size:12px; padding:20px; }
+
+  /* heap nodes (linked lists, trees, malloc'd data) */
+  .heaphdr { font-size:11px; color:#9d9d9d; margin:6px 0 4px; text-transform:uppercase; }
+  #heap { display:flex; flex-wrap:wrap; gap:26px 46px; align-items:flex-start; padding:6px 4px 16px; }
+  .hnode { border:1.5px solid #61afef; border-radius:6px; background:#2a2d3a; min-width:110px; }
+  .hnode.dead { opacity:.32; border-style:dashed; filter:grayscale(.6); }
+  .hnode .hhead { font:10px var(--mono); color:#61afef; padding:3px 8px;
+                  border-bottom:1px solid #3c3c3c; }
+  .hnode .hf { display:flex; justify-content:space-between; gap:10px;
+               padding:3px 8px; font:12px var(--mono); }
+  .hnode .hf + .hf { border-top:1px dotted #3c3c3c; }
+  .hnode .hfn { color:#9cdcfe; }
+  .hnode .hfv { color:#b5cea8; }
+  .hnode .hval { padding:5px 8px; font:13px var(--mono); color:#b5cea8; }
+</style>
+</head>
+<body>
+<div id="bar">
+  <b>C Editor</b>
+  <button id="runBtn" title="Cmd+Enter">▶ Run</button>
+  <button id="vizBtn" class="sec">👁 Visualize</button>
+  <button id="fmtBtn" class="sec" title="Shift+Alt+F">✨ Prettify</button>
+  <span id="status"></span>
+</div>
+<div id="main">
+  <div id="left">
+    <div id="gutter"></div>
+    <div id="wrap">
+      <div id="overlay"></div>
+      <textarea id="code" spellcheck="false" wrap="off" autocapitalize="off" autocomplete="off"></textarea>
+    </div>
+  </div>
+  <div id="right">
+    <div id="tabs">
+      <div id="tabOut" class="on">Output</div>
+      <div id="tabMem">Memory</div>
+    </div>
+    <div id="outpane" class="pane on">
+      <label>stdin (program input)</label>
+      <textarea id="stdin" placeholder="input for scanf, one value per line"></textarea>
+      <div id="output"><span class="meta">Press ▶ Run (Cmd+Enter)</span></div>
+    </div>
+    <div id="mempane" class="pane">
+      <div id="vizctl">
+        <button id="firstB" class="sec">⏮</button>
+        <button id="prevB" class="sec">◀</button>
+        <button id="playB" class="sec">▶ Play</button>
+        <button id="nextB" class="sec">▶</button>
+        <button id="bpB" class="sec" title="run to next breakpoint (click gutter line numbers to set)">⇥ ●</button>
+        <input type="range" id="slider" min="0" max="0" value="0">
+        <span id="stepinfo">–</span>
+      </div>
+      <div id="crash"></div>
+      <div id="vizout"></div>
+      <div id="mem"><div id="memhint">Click 👁 Visualize to step through your program and watch variables & pointers.</div></div>
+    </div>
+  </div>
+</div>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const ta = $("code"), overlay = $("overlay"), gutter = $("gutter");
+const esc = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+const norm = a => { const n = parseInt(a, 16); return isNaN(n) ? null : "0x" + n.toString(16); };
+const PALETTE = ["#e06c75","#61afef","#c678dd","#e5c07b","#56b6c2","#98c379"];
+
+let diags = [], vizLine = 0, trace = null, cur = 0, playTimer = null, prevVals = {}, prevCells = {};
+
+ta.value = localStorage.getItem("csrc") || `#include <stdio.h>
+
+int main(void) {
+    int a = 5;
+    int *p = &a;
+    *p = 42;
+    int arr[4] = {10, 20, 30, 40};
+    for (int i = 0; i < 4; i++) {
+        printf("arr[%d] = %d\\n", i, arr[i]);
+    }
+    return 0;
+}
+`;
+
+/* ---------- syntax highlighting (tiny C tokenizer) ---------- */
+const C_KW = new Set("if else for while do return switch case break continue default goto sizeof typedef struct union enum static const extern register volatile inline auto".split(" "));
+const C_TY = new Set("int char float double void long short unsigned signed size_t ssize_t FILE bool _Bool NULL int8_t int16_t int32_t int64_t uint8_t uint16_t uint32_t uint64_t".split(" "));
+
+function hlLine(line, inC) {
+  if (!inC && /^\s*#/.test(line)) return [`<span class="tk-pp">${esc(line)}</span>`, false];
+  let out = "", i = 0, m;
+  while (i < line.length) {
+    const rest = line.slice(i);
+    if (inC) {
+      const e = rest.indexOf("*/");
+      if (e < 0) return [out + `<span class="tk-cm">${esc(rest)}</span>`, true];
+      out += `<span class="tk-cm">${esc(rest.slice(0, e + 2))}</span>`; i += e + 2; inC = false;
+    } else if (rest.startsWith("//")) {
+      return [out + `<span class="tk-cm">${esc(rest)}</span>`, false];
+    } else if (rest.startsWith("/*")) {
+      out += `<span class="tk-cm">/*</span>`; i += 2; inC = true;
+    } else if ((m = rest.match(/^"(\\.|[^"\\])*("|$)|^'(\\.|[^'\\])*('|$)/))) {
+      out += `<span class="tk-st">${esc(m[0])}</span>`; i += m[0].length;
+    } else if ((m = rest.match(/^\d[\w.]*/))) {
+      out += `<span class="tk-nu">${esc(m[0])}</span>`; i += m[0].length;
+    } else if ((m = rest.match(/^[A-Za-z_]\w*/))) {
+      const w = m[0];
+      out += C_KW.has(w) ? `<span class="tk-kw">${w}</span>`
+           : C_TY.has(w) ? `<span class="tk-ty">${w}</span>` : esc(w);
+      i += w.length;
+    } else {
+      out += esc(rest[0]); i += 1;
+    }
+  }
+  return [out, inC];
+}
+
+/* ---------- editor rendering ---------- */
+const bp = new Set();  // breakpoint line numbers
+
+function render() {
+  const lines = ta.value.split("\n");
+  const byLine = {};
+  for (const d of diags) {
+    const sev = d.sev.includes("error") ? "err" : d.sev === "warning" ? "warn" : null;
+    if (!sev) continue;
+    if (!byLine[d.line] || byLine[d.line].sev === "warn")
+      byLine[d.line] = { sev, msg: d.msg };
+  }
+  let inC = false;
+  overlay.innerHTML = lines.map((l, i) => {
+    const n = i + 1, d = byLine[n];
+    const cls = "ln" + (d ? " " + d.sev : "") + (n === vizLine ? " cur" : "");
+    const msg = d ? `<span class="msg">⟵ ${esc(d.msg)}</span>` : "";
+    let code; [code, inC] = hlLine(l, inC);
+    return `<div class="${cls}">${code}${msg}</div>`;
+  }).join("");
+  gutter.innerHTML = lines.map((_, i) => {
+    const n = i + 1, d = byLine[n];
+    return `<div class="${d ? d.sev : ""}" data-l="${n}">${bp.has(n) ? '<span class="bpdot">●</span>' : ""}${n}</div>`;
+  }).join("");
+  syncScroll();
+}
+gutter.addEventListener("click", e => {
+  const n = +e.target.closest("[data-l]")?.dataset.l;
+  if (!n) return;
+  bp.has(n) ? bp.delete(n) : bp.add(n);
+  render();
+});
+function syncScroll() {
+  overlay.scrollTop = ta.scrollTop; overlay.scrollLeft = ta.scrollLeft;
+  gutter.scrollTop = ta.scrollTop;
+}
+ta.addEventListener("scroll", syncScroll);
+ta.addEventListener("input", () => {
+  localStorage.setItem("csrc", ta.value);
+  vizLine = 0; render(); lensDebounced();
+});
+ta.addEventListener("keydown", e => {
+  if (e.key === "Tab") {
+    e.preventDefault();
+    const s = ta.selectionStart, en = ta.selectionEnd;
+    ta.setRangeText("    ", s, en, "end");
+    ta.dispatchEvent(new Event("input"));
+  }
+});
+document.addEventListener("keydown", e => {
+  if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); run(); }
+  if (e.shiftKey && e.altKey && e.code === "KeyF") { e.preventDefault(); prettify(); }
+});
+
+/* ---------- api ---------- */
+async function api(path, body) {
+  const r = await fetch(path, { method: "POST", body: JSON.stringify(body) });
+  return r.json();
+}
+const status = t => $("status").textContent = t;
+
+/* ---------- error lens: live compile on idle ---------- */
+let lensT = null;
+function lensDebounced() { clearTimeout(lensT); lensT = setTimeout(lens, 700); }
+async function lens() {
+  try {
+    const r = await api("/api/compile", { code: ta.value });
+    diags = r.diags || []; render();
+    const errs = diags.filter(d => d.sev.includes("error")).length;
+    status(errs ? `✗ ${errs} error(s)` : "✓ compiles");
+  } catch { status("server offline?"); }
+}
+
+/* ---------- run ---------- */
+async function run() {
+  status("compiling…"); $("runBtn").disabled = true;
+  tab("out");
+  try {
+    const r = await api("/api/run", { code: ta.value, stdin: $("stdin").value });
+    diags = r.diags || []; render();
+    const o = $("output");
+    if (!r.ok) {
+      o.innerHTML = `<span class="stderr">compile failed — see error lens</span>`;
+      status("✗ compile error");
+    } else {
+      let h = esc(r.stdout || "");
+      if (r.stderr) h += `<span class="stderr">${esc(r.stderr)}</span>`;
+      h += r.timeout != null
+        ? `\n<span class="stderr">⏱ killed after ${r.timeout}s (infinite loop?)</span>`
+        : `\n<span class="meta">— exited with code ${r.exit}</span>`;
+      o.innerHTML = h;
+      status(r.timeout != null ? "⏱ timeout" : `exit ${r.exit}`);
+    }
+  } catch (e) { status("run failed: " + e.message); }
+  $("runBtn").disabled = false;
+}
+
+/* ---------- prettify ---------- */
+async function prettify() {
+  const r = await api("/api/format", { code: ta.value });
+  if (!r.ok) { status("format failed"); return; }
+  const pos = ta.selectionStart;
+  ta.value = r.code;
+  ta.selectionStart = ta.selectionEnd = Math.min(pos, r.code.length);
+  ta.dispatchEvent(new Event("input"));
+  status("✨ formatted");
+}
+
+/* ---------- visualizer ---------- */
+let heapSeq = {}, heapSnap = [];  // stable node order + carry-forward snapshots
+
+function prepHeap(steps) {
+  heapSeq = {}; heapSnap = []; let q = 0, carry = {};
+  for (const st of steps) {
+    const h = st.heap || {};
+    for (const a of Object.keys(h)) if (!(a in heapSeq)) heapSeq[a] = q++;
+    const snap = {};
+    for (const a of Object.keys(carry)) snap[a] = { node: carry[a].node, live: false };
+    for (const a of Object.keys(h)) snap[a] = { node: h[a], live: true };
+    heapSnap.push(snap); carry = snap;
+  }
+}
+
+async function visualize() {
+  status("tracing…"); $("vizBtn").disabled = true;
+  try {
+    const r = await api("/api/trace", { code: ta.value, stdin: $("stdin").value });
+    diags = r.diags || []; render();
+    if (!r.ok || !r.steps || !r.steps.length) {
+      status("✗ " + (r.error ? "trace failed" : "compile error"));
+      if (r.error) { $("output").textContent = r.error; tab("out"); }
+      $("vizBtn").disabled = false;
+      return;
+    }
+    trace = r; cur = 0; prevVals = {}; prevCells = {};
+    prepHeap(r.steps);
+    $("slider").max = r.steps.length - 1;
+    tab("mem");
+    showStep(0);
+    status(`${r.steps.length} steps` + (r.truncated ? " (truncated)" : ""));
+  } catch (e) { status("trace failed: " + e.message); }
+  $("vizBtn").disabled = false;
+}
+
+// shorten 0x00007ffe… addresses for display; full value kept in title
+const short = s => /^0x[0-9a-fA-F]{7,}$/.test(s) ? "…" + s.slice(-4) : s;
+
+// 1D array -> single row of cells; 2D array / array of structs -> full grid with indices
+function grid(children) {
+  const cell = c => `<td data-addr="${norm(c.addr) || ""}" ${c.ptr ? `data-ptr="${norm(c.ptr)}"` : ""}
+    title="${esc(c.name)} = ${esc(String(c.value))}">${esc(short(String(c.value)))}</td>`;
+  const is2d = children.some(c => c.children);
+  if (!is2d) {
+    return `<table class="mgrid"><tr>${children.map(c => `<td class="idx">${esc(c.name)}</td>`).join("")}</tr>
+            <tr>${children.map(cell).join("")}</tr></table>`;
+  }
+  const cols = Math.max(...children.map(c => (c.children || []).length));
+  return `<table class="mgrid">
+    <tr><td class="idx"></td>${Array.from({length: cols}, (_, j) => `<td class="idx">${j}</td>`).join("")}</tr>` +
+    children.map(r => `<tr><td class="idx">${esc(r.name)}</td>${(r.children || [r]).map(cell).join("")}</tr>`).join("") +
+    `</table>`;
+}
+
+function varBox(v, color) {
+  const na = norm(v.addr);
+  const ptr = v.ptr ? norm(v.ptr) : null;
+  let h = `<div class="vbox" data-addr="${na || ""}" ${ptr ? `data-ptr="${ptr}"` : ""}
+       ${color ? `style="border-color:${color}"` : ""}>`;
+  h += `<span class="vn">${esc(v.name)}</span> <span class="vt">${esc(v.type)}</span>`;
+  if (v.children) {
+    h += grid(v.children);
+  } else {
+    let val = short(String(v.value));
+    if (v.ptr && v.pointee !== undefined && !v.pointee.startsWith?.("0x")) val += ` → ${v.pointee}`;
+    h += `<div class="vv" title="${esc(String(v.value))}">${esc(val)}</div>`;
+  }
+  if (v.addr) h += `<div class="va">${esc(v.addr)}</div>`;
+  return h + `</div>`;
+}
+
+function heapNode(addr, node, live) {
+  let h = `<div class="hnode ${live ? "" : "dead"}" data-addr="${norm(addr)}">
+    <div class="hhead">${esc(node.type)} @ ${short(addr)}${live ? "" : " (freed/unreachable)"}</div>`;
+  if (node.children) {
+    h += node.children.map(c =>
+      `<div class="hf" data-addr="${norm(c.addr) || ""}" ${c.ptr && parseInt(c.ptr, 16) ? `data-ptr="${norm(c.ptr)}"` : ""}>
+         <span class="hfn">${esc(c.name)}</span>
+         ${c.children ? grid(c.children)
+           : `<span class="hfv" title="${esc(String(c.value))}">${esc(short(String(c.value)))}</span>`}
+       </div>`).join("");
+  } else {
+    h += `<div class="hval">${esc(String(node.value))}</div>`;
+  }
+  return h + `</div>`;
+}
+
+function showStep(i) {
+  if (!trace) return;
+  cur = Math.max(0, Math.min(i, trace.steps.length - 1));
+  const st = trace.steps[cur];
+  $("slider").value = cur;
+  $("stepinfo").textContent = `step ${cur + 1}/${trace.steps.length} · ${st.func || "?"}:${st.line}`;
+  $("vizout").textContent = st.stdout || "(no output yet)";
+  const crashNow = st.crashed;
+  $("crash").style.display = crashNow ? "block" : "none";
+  if (crashNow) $("crash").textContent = "💥 CRASH: " + (trace.crash_reason || "bad memory access");
+
+  // highlight source line + scroll to it
+  vizLine = st.line; render();
+  const lh = 20, top = (st.line - 1) * lh;
+  if (top < ta.scrollTop || top > ta.scrollTop + ta.clientHeight - lh * 2)
+    ta.scrollTop = Math.max(0, top - ta.clientHeight / 2);
+  syncScroll();
+
+  // frames + vars; color pointers, mark changed values
+  let ci = 0;
+  const colors = {};
+  for (const f of st.frames) for (const v of f.vars)
+    if (v.ptr) colors[f.func + "." + v.name] = PALETTE[ci++ % PALETTE.length];
+  const snap = heapSnap[cur] || {};
+  const heapHtml = Object.keys(snap).length
+    ? `<div class="heaphdr">Heap / pointed-to memory</div><div id="heap">` +
+      Object.entries(snap).sort((a, b) => heapSeq[a[0]] - heapSeq[b[0]])
+        .map(([a, e]) => heapNode(a, e.node, e.live)).join("") + `</div>`
+    : "";
+  $("mem").innerHTML = `<svg id="arrows"></svg>` + st.frames.map((f, fi) =>
+    `<div class="frame ${fi === st.frames.length - 1 ? "top" : ""}">
+       <div class="fhead">${esc(f.func)}( ) — line ${f.line}</div>
+       <div class="fvars">${f.vars.map(v => varBox(v, colors[f.func + "." + v.name])).join("")}</div>
+     </div>`).join("") + heapHtml;
+
+  // changed-value glow (whole boxes)
+  const nowVals = {};
+  for (const f of st.frames) for (const v of f.vars)
+    nowVals[f.func + "." + v.name] = JSON.stringify([v.value, v.children]);
+  document.querySelectorAll(".vbox").forEach(b => {
+    const key = b.closest(".frame").querySelector(".fhead").textContent.split("(")[0] + "." + b.querySelector(".vn").textContent;
+    if (prevVals[key] !== undefined && prevVals[key] !== nowVals[key]) b.classList.add("changed");
+  });
+  prevVals = nowVals;
+
+  // changed-cell highlight by address (matrix cells, heap fields) — shows e.g.
+  // matrix multiplication filling the result cell by cell
+  const nowCells = {};
+  const walk = c => {
+    if (c.addr) nowCells[norm(c.addr)] = String(c.value);
+    (c.children || []).forEach(walk);
+  };
+  for (const f of st.frames) for (const v of f.vars) walk(v);
+  for (const e of Object.values(snap)) if (e.live) (e.node.children || []).forEach(walk);
+  document.querySelectorAll("[data-addr]").forEach(el => {
+    const a = el.getAttribute("data-addr");
+    if (a && prevCells[a] !== undefined && nowCells[a] !== undefined && prevCells[a] !== nowCells[a])
+      el.classList.add("chg");
+  });
+  prevCells = nowCells;
+  drawArrows(colors, st);
+}
+
+function drawArrows(colors, st) {
+  const mem = $("mem"), svg = $("arrows");
+  const mr = mem.getBoundingClientRect();
+  let paths = "";
+  document.querySelectorAll("[data-ptr]").forEach(pb => {
+    const target = pb.getAttribute("data-ptr");
+    if (!target) return;
+    const tb = [...document.querySelectorAll("[data-addr]")].find(e => e !== pb && e.getAttribute("data-addr") === target);
+    const color = pb.style.borderColor || "#61afef";
+    const pr = pb.getBoundingClientRect();
+    const x1 = pr.right - mr.left + mem.scrollLeft, y1 = pr.top + pr.height / 2 - mr.top + mem.scrollTop;
+    if (tb) {
+      const tr = tb.getBoundingClientRect();
+      const y2 = tr.top - mr.top + mem.scrollTop + Math.min(tr.height / 2, 14);
+      let x2, d;
+      if (tr.left - mr.left + mem.scrollLeft > x1 + 12) {
+        // target to the right (typical linked-list chain): source right → target left
+        x2 = tr.left - mr.left + mem.scrollLeft;
+        d = `M ${x1} ${y1} C ${x1 + 24} ${y1}, ${x2 - 24} ${y2}, ${x2 - 3} ${y2}`;
+      } else {
+        // target left/above/below: loop around via the right side
+        x2 = tr.right - mr.left + mem.scrollLeft;
+        const bend = 34 + Math.min(40, Math.abs(y2 - y1) / 6);
+        d = `M ${x1} ${y1} C ${x1 + bend} ${y1}, ${x2 + bend} ${y2}, ${x2 + 3} ${y2}`;
+      }
+      paths += `<path d="${d}" fill="none" stroke="${color}" stroke-width="2"/>
+                <circle cx="${x2 + (x2 < x1 ? 3 : -1)}" cy="${y2}" r="3.5" fill="${color}"/>`;
+    }
+    // ponytail: no visual for unmatched pointers — the box already shows the raw address
+  });
+  svg.setAttribute("width", mem.scrollWidth); svg.setAttribute("height", mem.scrollHeight);
+  svg.innerHTML = paths;
+}
+
+function play() {
+  if (playTimer) { clearInterval(playTimer); playTimer = null; $("playB").textContent = "▶ Play"; return; }
+  $("playB").textContent = "⏸ Pause";
+  playTimer = setInterval(() => {
+    if (cur >= trace.steps.length - 1) { clearInterval(playTimer); playTimer = null; $("playB").textContent = "▶ Play"; return; }
+    showStep(cur + 1);
+    if (bp.has(trace.steps[cur].line)) { clearInterval(playTimer); playTimer = null; $("playB").textContent = "▶ Play"; }
+  }, 650);
+}
+
+/* ---------- tabs & wiring ---------- */
+function tab(which) {
+  $("tabOut").classList.toggle("on", which === "out");
+  $("tabMem").classList.toggle("on", which === "mem");
+  $("outpane").classList.toggle("on", which === "out");
+  $("mempane").classList.toggle("on", which === "mem");
+  if (which !== "mem") { vizLine = 0; render(); } else if (trace) showStep(cur);
+}
+$("tabOut").onclick = () => tab("out");
+$("tabMem").onclick = () => tab("mem");
+$("runBtn").onclick = run;
+$("fmtBtn").onclick = prettify;
+$("vizBtn").onclick = visualize;
+$("firstB").onclick = () => showStep(0);
+$("prevB").onclick = () => showStep(cur - 1);
+$("nextB").onclick = () => showStep(cur + 1);
+$("playB").onclick = play;
+$("bpB").onclick = () => {
+  if (!trace) return;
+  for (let i = cur + 1; i < trace.steps.length; i++)
+    if (bp.has(trace.steps[i].line)) { showStep(i); return; }
+  status(bp.size ? "no breakpoint hit after this step" : "click a line number to set a breakpoint");
+};
+$("slider").oninput = e => showStep(+e.target.value);
+document.addEventListener("keydown", e => {
+  if (!$("mempane").classList.contains("on") || e.target === ta || e.target.tagName === "TEXTAREA") return;
+  if (e.key === "ArrowRight") showStep(cur + 1);
+  if (e.key === "ArrowLeft") showStep(cur - 1);
+});
+
+render(); lens();
+</script>
+</body>
+</html>
