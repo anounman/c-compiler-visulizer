@@ -144,7 +144,9 @@ def __lldb_init_module(debugger, internal_dict):
         n += 1
         thread = process.GetSelectedThread()
         reason = thread.GetStopReason()
-        if reason == lldb.eStopReasonException:
+        # macOS delivers bad-memory as a Mach exception; Linux as a POSIX signal
+        # (SIGSEGV/SIGABRT/SIGFPE). Treat either as a crash.
+        if reason in (lldb.eStopReasonException, lldb.eStopReasonSignal):
             crashed = True
             crash_reason = thread.GetStopDescription(256)
         frame = thread.GetFrameAtIndex(0)

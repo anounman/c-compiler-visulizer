@@ -1,0 +1,5 @@
+.git
+DEPLOY.md
+*.md
+scratchpad
+__pycache__

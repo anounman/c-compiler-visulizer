@@ -8,11 +8,14 @@ import shutil
 import subprocess
 import tempfile
 
-PORT = 8000
+PORT = int(os.environ.get("PORT", 8000))
+HOST = os.environ.get("HOST", "0.0.0.0")  # 0.0.0.0 for containers; see security note in DEPLOY.md
 HERE = os.path.dirname(os.path.abspath(__file__))
 ERR_RE = re.compile(r'^[^:\n]*prog\.c:(\d+):(\d+): (fatal error|error|warning|note): (.*)$', re.M)
 RUN_TIMEOUT = 5
 TRACE_TIMEOUT = 30
+# clang-format: bare binary on Linux, xcrun wrapper on macOS
+CLANG_FORMAT = ["clang-format"] if shutil.which("clang-format") else ["xcrun", "clang-format"]
 
 
 def compile_c(code, extra=()):
@@ -23,7 +26,7 @@ def compile_c(code, extra=()):
         f.write(code)
     binp = os.path.join(d, "prog")
     p = subprocess.run(
-        ["gcc", "-g", "-O0", "-Wall", "-fno-color-diagnostics", *extra, src, "-o", binp],
+        ["gcc", "-g", "-O0", "-Wall", "-fdiagnostics-color=never", *extra, src, "-o", binp],
         capture_output=True, text=True, timeout=30)
     diags = [{"line": int(m[0]), "col": int(m[1]), "sev": m[2], "msg": m[3]}
              for m in ERR_RE.findall(p.stderr)]
@@ -57,7 +60,7 @@ def api_run(body):
 
 def api_format(body):
     p = subprocess.run(
-        ["xcrun", "clang-format", "-style={BasedOnStyle: LLVM, IndentWidth: 4, AllowShortFunctionsOnASingleLine: None}",
+        [*CLANG_FORMAT, "-style={BasedOnStyle: LLVM, IndentWidth: 4, AllowShortFunctionsOnASingleLine: None}",
          "-assume-filename=prog.c"],
         input=body.get("code", ""), capture_output=True, text=True, timeout=15)
     if p.returncode != 0:
@@ -134,5 +137,5 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    print(f"C editor -> http://localhost:{PORT}")
-    http.server.ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
+    print(f"C editor -> http://localhost:{PORT}  (binding {HOST}:{PORT})")
+    http.server.ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
