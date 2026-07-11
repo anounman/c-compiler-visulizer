@@ -34,8 +34,12 @@
 
   /* layout */
   #main { flex:1; display:flex; min-height:0; }
-  #left { flex:1.2; display:flex; min-width:0; border-right:1px solid var(--border); }
-  #right { flex:1; display:flex; flex-direction:column; min-width:0; }
+  #left { flex:0 0 55%; display:flex; min-width:220px; }
+  #splitter { flex:0 0 7px; background:var(--border); cursor:col-resize; position:relative; }
+  #splitter::before { content:""; position:absolute; inset:0 3px; background:#555; opacity:.45; }
+  #splitter:hover, body.resizing #splitter { background:#4a4a4a; }
+  body.resizing { cursor:col-resize; user-select:none; }
+  #right { flex:1 1 auto; display:flex; flex-direction:column; min-width:240px; }
 
   /* editor */
   #gutter { width:48px; padding:8px 0; background:var(--panel); overflow:hidden;
@@ -163,6 +167,7 @@
       <textarea id="code" spellcheck="false" wrap="off" autocapitalize="off" autocomplete="off"></textarea>
     </div>
   </div>
+  <div id="splitter" title="Drag to resize editor and output panes"></div>
   <div id="right">
     <div id="tabs">
       <div id="tabOut" class="on">Output</div>
@@ -203,6 +208,45 @@ const norm = a => { const n = parseInt(a, 16); return isNaN(n) ? null : "0x" + n
 const PALETTE = ["#e06c75","#61afef","#c678dd","#e5c07b","#56b6c2","#98c379"];
 
 let diags = [], vizLine = 0, trace = null, cur = 0, playTimer = null, prevVals = {}, prevCells = {};
+
+/* ---------- resizable editor / output panes ---------- */
+const mainEl = $("main"), leftEl = $("left"), splitterEl = $("splitter");
+let splitRatio = parseFloat(localStorage.getItem("splitRatio")) || 0.55;
+
+function setSplit(px, persist) {
+  const r = mainEl.getBoundingClientRect();
+  const minLeft = 220, minRight = 240, handle = splitterEl.offsetWidth || 7;
+  const maxLeft = Math.max(minLeft, r.width - minRight - handle);
+  const leftWidth = Math.min(Math.max(px, minLeft), maxLeft);
+  leftEl.style.flexBasis = leftWidth + "px";
+  if (persist && r.width > 0) {
+    splitRatio = leftWidth / r.width;
+    localStorage.setItem("splitRatio", String(splitRatio));
+  }
+}
+
+function applySplit() {
+  setSplit(mainEl.getBoundingClientRect().width * splitRatio, false);
+}
+
+splitterEl.addEventListener("pointerdown", e => {
+  e.preventDefault();
+  splitterEl.setPointerCapture(e.pointerId);
+  document.body.classList.add("resizing");
+});
+splitterEl.addEventListener("pointermove", e => {
+  if (!splitterEl.hasPointerCapture(e.pointerId)) return;
+  setSplit(e.clientX - mainEl.getBoundingClientRect().left, true);
+});
+splitterEl.addEventListener("pointerup", e => {
+  if (splitterEl.hasPointerCapture(e.pointerId)) splitterEl.releasePointerCapture(e.pointerId);
+  document.body.classList.remove("resizing");
+});
+splitterEl.addEventListener("pointercancel", e => {
+  if (splitterEl.hasPointerCapture(e.pointerId)) splitterEl.releasePointerCapture(e.pointerId);
+  document.body.classList.remove("resizing");
+});
+window.addEventListener("resize", applySplit);
 
 const DEFAULT_C = `#include <stdio.h>
 
@@ -348,12 +392,99 @@ ta.addEventListener("input", () => {
   saveFiles();
   vizLine = 0; render(); lensDebounced();
 });
+
+function editorChanged() {
+  ta.dispatchEvent(new Event("input"));
+}
+
+function toggleLineComment() {
+  const value = ta.value;
+  const selStart = ta.selectionStart;
+  const selEnd = ta.selectionEnd;
+  const start = value.lastIndexOf("\n", selStart - 1) + 1;
+  const endAnchor = selEnd > selStart && value[selEnd - 1] === "\n" ? selEnd - 1 : selEnd;
+  let end = value.indexOf("\n", endAnchor);
+  if (end === -1) end = value.length;
+
+  const block = value.slice(start, end);
+  const lines = block.split("\n");
+  const nonBlank = lines.filter(line => line.trim().length);
+  const uncomment = nonBlank.length > 0 && nonBlank.every(line => /^\s*\/\//.test(line));
+  let deltaStart = 0, deltaEnd = 0;
+
+  const next = lines.map((line, i) => {
+    if (!line.trim()) return line;
+    if (uncomment) {
+      const before = line.length;
+      const out = line.replace(/^(\s*)\/\/ ?/, "$1");
+      const diff = out.length - before;
+      if (i === 0) deltaStart += diff;
+      deltaEnd += diff;
+      return out;
+    }
+    const indent = line.match(/^\s*/)[0].length;
+    if (start + lines.slice(0, i).join("\n").length + (i ? 1 : 0) + indent <= selStart) deltaStart += 3;
+    deltaEnd += 3;
+    return line.slice(0, indent) + "// " + line.slice(indent);
+  }).join("\n");
+
+  ta.setRangeText(next, start, end, "end");
+  if (selStart === selEnd) {
+    const linePos = Math.max(start, selStart + (uncomment ? deltaStart : 3));
+    ta.selectionStart = ta.selectionEnd = Math.min(linePos, ta.value.length);
+  } else {
+    ta.selectionStart = Math.max(start, selStart + deltaStart);
+    ta.selectionEnd = Math.max(ta.selectionStart, selEnd + deltaEnd);
+  }
+  editorChanged();
+}
+
+const PAIRS = { "(": ")", "[": "]", "{": "}", "\"": "\"", "'": "'" };
+const CLOSERS = new Set(Object.values(PAIRS));
+
+function autoClosePair(open) {
+  const close = PAIRS[open];
+  if (!close) return false;
+  const s = ta.selectionStart, e = ta.selectionEnd;
+  const selected = ta.value.slice(s, e);
+  ta.setRangeText(open + selected + close, s, e, "end");
+  ta.selectionStart = s + 1;
+  ta.selectionEnd = s + 1 + selected.length;
+  editorChanged();
+  return true;
+}
+
 ta.addEventListener("keydown", e => {
+  if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && (e.key === "/" || e.code === "Slash")) {
+    e.preventDefault();
+    toggleLineComment();
+    return;
+  }
   if (e.key === "Tab") {
     e.preventDefault();
     const s = ta.selectionStart, en = ta.selectionEnd;
     ta.setRangeText("    ", s, en, "end");
-    ta.dispatchEvent(new Event("input"));
+    editorChanged();
+    return;
+  }
+  if (!e.metaKey && !e.ctrlKey && !e.altKey && PAIRS[e.key]) {
+    e.preventDefault();
+    autoClosePair(e.key);
+    return;
+  }
+  if (!e.metaKey && !e.ctrlKey && !e.altKey && CLOSERS.has(e.key) && ta.selectionStart === ta.selectionEnd && ta.value[ta.selectionStart] === e.key) {
+    e.preventDefault();
+    ta.selectionStart = ta.selectionEnd = ta.selectionStart + 1;
+    return;
+  }
+  if (!e.metaKey && !e.ctrlKey && !e.altKey && e.key === "Backspace" && ta.selectionStart === ta.selectionEnd) {
+    const s = ta.selectionStart;
+    const open = ta.value[s - 1], close = ta.value[s];
+    if (PAIRS[open] === close) {
+      e.preventDefault();
+      ta.setRangeText("", s - 1, s + 1, "end");
+      editorChanged();
+    }
   }
 });
 document.addEventListener("keydown", e => {
@@ -752,7 +883,7 @@ document.addEventListener("keydown", e => {
   if (e.key === "ArrowLeft") showStep(cur - 1);
 });
 
-renderTabs(); render(); lens();
+applySplit(); renderTabs(); render(); lens();
 </script>
 </body>
 </html>
