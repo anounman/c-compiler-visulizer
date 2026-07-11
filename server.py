@@ -15,6 +15,7 @@ import time
 import re
 import uuid
 from urllib.parse import urlparse, parse_qs
+from urllib.request import Request, urlopen
 
 PORT = int(os.environ.get("PORT", 8000))
 HOST = os.environ.get("HOST", "0.0.0.0")  # 0.0.0.0 for containers; see security note in DEPLOY.md
@@ -22,8 +23,60 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ERR_RE = re.compile(r'^[^:\n]*?([A-Za-z0-9._-]+\.[ch]):(\d+):(\d+): (fatal error|error|warning|note): (.*)$', re.M)
 FNAME_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$')  # rejects '/', '..', leading dot
 TRACE_TIMEOUT = 30
+APP_VERSION = os.environ.get("APP_VERSION", "dev")
+DOCKER_IMAGE = "anounman/c-editor"
+DOCKER_TAGS_URL = f"https://hub.docker.com/v2/repositories/{DOCKER_IMAGE}/tags?page_size=100"
+DOCKER_PAGE_URL = f"https://hub.docker.com/r/{DOCKER_IMAGE}/tags"
+SEMVER_RE = re.compile(r'^v?(\d+)\.(\d+)\.(\d+)$')
+UPDATE_CACHE_TTL = 15 * 60
+UPDATE_CACHE = {"checked_at": 0.0, "value": None}
+UPDATE_CACHE_LOCK = threading.Lock()
 # clang-format: bare binary on Linux, xcrun wrapper on macOS
 CLANG_FORMAT = ["clang-format"] if shutil.which("clang-format") else ["xcrun", "clang-format"]
+
+
+def semver(version):
+    """Return a comparable stable semantic version tuple, or None."""
+    match = SEMVER_RE.fullmatch(str(version).strip())
+    return tuple(map(int, match.groups())) if match else None
+
+
+def fetch_update_status(current=APP_VERSION, opener=urlopen):
+    """Compare this image version with the newest stable Docker Hub tag."""
+    current_tuple = semver(current)
+    result = {"ok": True, "current": current, "update_available": False}
+    if current_tuple is None:  # local/dev builds have no meaningful release version
+        return result
+
+    request = Request(DOCKER_TAGS_URL, headers={"User-Agent": "c-editor-update-check/1"})
+    with opener(request, timeout=4) as response:
+        payload = json.load(response)
+    versions = [(semver(tag.get("name")), tag.get("name"))
+                for tag in payload.get("results", []) if isinstance(tag, dict)]
+    versions = [(version, name) for version, name in versions if version is not None]
+    if not versions:
+        return result
+
+    latest_tuple, latest_name = max(versions, key=lambda item: item[0])
+    result.update(latest=latest_name, update_available=latest_tuple > current_tuple,
+                  url=DOCKER_PAGE_URL)
+    return result
+
+
+def api_update():
+    """Cached, fail-quiet update status for the browser."""
+    now = time.monotonic()
+    with UPDATE_CACHE_LOCK:
+        if (UPDATE_CACHE["value"] is not None and
+                now - UPDATE_CACHE["checked_at"] < UPDATE_CACHE_TTL):
+            return UPDATE_CACHE["value"]
+        try:
+            value = fetch_update_status()
+        except Exception:
+            value = {"ok": False, "current": APP_VERSION,
+                     "update_available": False}
+        UPDATE_CACHE.update(checked_at=now, value=value)
+        return value
 
 
 def clean_files(body):
@@ -208,8 +261,18 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         super().__init__(*a, directory=HERE, **kw)
 
     def do_GET(self):
-        if urlparse(self.path).path == "/api/stream":
+        path = urlparse(self.path).path
+        if path == "/api/stream":
             return self.stream()
+        if path == "/api/update":
+            data = json.dumps(api_update()).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
         return super().do_GET()
 
     def stream(self):

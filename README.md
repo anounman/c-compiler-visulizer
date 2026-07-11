@@ -69,6 +69,25 @@ HOST=127.0.0.1 PORT=3000 python3 server.py
 | --- | --- | --- |
 | `HOST` | `0.0.0.0` | Address used by the HTTP server |
 | `PORT` | `8000` | HTTP server port |
+| `APP_VERSION` | `dev` | Current semantic release tag, embedded by the Docker build |
+
+## Publishing a Docker Hub release
+
+Published images use semantic version tags. Build each release with its version embedded,
+then push both the immutable version tag and the convenient `latest` tag:
+
+```sh
+VERSION=v1.0.0
+docker build --build-arg APP_VERSION="$VERSION" \
+  -t anounman/c-editor:"$VERSION" \
+  -t anounman/c-editor:latest .
+docker push anounman/c-editor:"$VERSION"
+docker push anounman/c-editor:latest
+```
+
+When a newer stable `vX.Y.Z` tag appears on Docker Hub, older running versions show a
+dismissible update notification in the editor. Open browser sessions check every 15 minutes.
+Docker Hub lookup failures are ignored and retried after the server's cache expires.
 
 ## Using the visualizer
 

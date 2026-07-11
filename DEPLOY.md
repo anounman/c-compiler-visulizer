@@ -36,3 +36,20 @@ VPN / SSO). Do **not** put it on the open internet.
   your users.
 
 `PORT` env is honored (defaults 8000); `HOST` defaults `0.0.0.0`.
+
+## Versioned Docker Hub releases
+
+Embed the semantic release version while building, and publish the same image under its
+version and `latest`:
+
+```sh
+VERSION=v1.0.0
+docker build --build-arg APP_VERSION="$VERSION" \
+  -t anounman/c-editor:"$VERSION" -t anounman/c-editor:latest .
+docker push anounman/c-editor:"$VERSION"
+docker push anounman/c-editor:latest
+```
+
+The app checks the public Docker Hub tags endpoint at most once every 15 minutes. A running
+older semantic version shows users a notification; development builds (`APP_VERSION=dev`)
+do not check Docker Hub.

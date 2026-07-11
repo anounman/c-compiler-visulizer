@@ -23,6 +23,40 @@
   button:disabled { opacity:.5; cursor:default; }
   #status { margin-left:auto; font-size:12px; color:#9d9d9d; }
 
+  /* new-release notification */
+  #updateToast { position:fixed; z-index:20; top:18px; right:18px; width:min(390px,calc(100vw - 28px));
+                 overflow:hidden; border:1px solid rgba(97,175,239,.45); border-radius:12px;
+                 background:linear-gradient(145deg,#292d36,#202226); color:#f1f5f9;
+                 box-shadow:0 18px 48px rgba(0,0,0,.48),0 0 0 1px rgba(255,255,255,.035);
+                 animation:updateIn .38s cubic-bezier(.2,.8,.2,1); }
+  #updateToast[hidden] { display:none; }
+  #updateToast::before { content:""; display:block; height:3px;
+                         background:linear-gradient(90deg,#3794ff,#56b6c2,#98c379); }
+  .updateBody { display:flex; gap:13px; padding:17px 17px 15px; }
+  .updateIcon { display:grid; place-items:center; flex:0 0 42px; height:42px; border-radius:11px;
+                background:linear-gradient(145deg,rgba(55,148,255,.25),rgba(86,182,194,.12));
+                color:#61afef; box-shadow:inset 0 0 0 1px rgba(97,175,239,.25); }
+  .updateIcon svg { width:22px; height:22px; }
+  .updateContent { flex:1; min-width:0; }
+  .updateEyebrow { color:#61afef; font-size:10px; font-weight:700; letter-spacing:.12em;
+                   text-transform:uppercase; }
+  .updateTitle { margin-top:2px; font-size:16px; font-weight:650; letter-spacing:-.01em; }
+  .updateCopy { margin-top:5px; color:#aeb7c3; font-size:12px; line-height:1.5; }
+  .updateActions { display:flex; align-items:center; gap:8px; margin-top:13px; }
+  .updateActions a { display:inline-flex; align-items:center; gap:6px; padding:7px 11px;
+                     border-radius:6px; background:#0e639c; color:#fff; font-size:12px;
+                     font-weight:600; text-decoration:none; }
+  .updateActions a:hover { background:#1177bb; }
+  #updateDismiss { padding:7px 10px; background:transparent; color:#aeb7c3; }
+  #updateDismiss:hover { background:rgba(255,255,255,.06); color:#fff; }
+  #updateClose { flex:0 0 auto; width:28px; height:28px; padding:0; border-radius:7px;
+                 background:transparent; color:#8e99a8; font-size:20px; line-height:1; }
+  #updateClose:hover { background:rgba(255,255,255,.07); color:#fff; }
+  @keyframes updateIn { from { opacity:0; transform:translateY(-10px) scale(.97); }
+                        to { opacity:1; transform:none; } }
+  @media (max-width:520px) { #updateToast { top:10px; right:10px; width:calc(100vw - 20px); } }
+  @media (prefers-reduced-motion:reduce) { #updateToast { animation:none; } }
+
   /* file tabs */
   #ftabs { display:flex; gap:2px; margin-left:12px; overflow-x:auto; max-width:45vw; }
   #ftabs .ft { padding:4px 10px; font:12px var(--mono); color:#9d9d9d; cursor:pointer;
@@ -198,6 +232,26 @@
     </div>
   </div>
 </div>
+
+<aside id="updateToast" role="status" aria-live="polite" aria-label="Application update" hidden>
+  <div class="updateBody">
+    <div class="updateIcon" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 3v12m0 0 4-4m-4 4-4-4"/><path d="M5 17v2a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-2"/>
+      </svg>
+    </div>
+    <div class="updateContent">
+      <div class="updateEyebrow">New release</div>
+      <div class="updateTitle"><span id="updateVersion"></span> is available</div>
+      <div class="updateCopy">A newer C Editor image is ready. Pull the latest image and restart your container to update.</div>
+      <div class="updateActions">
+        <a id="updateLink" href="https://hub.docker.com/r/anounman/c-editor/tags" target="_blank" rel="noopener noreferrer">View on Docker Hub <span aria-hidden="true">↗</span></a>
+        <button id="updateDismiss" type="button">Not now</button>
+      </div>
+    </div>
+    <button id="updateClose" type="button" aria-label="Dismiss update notification">×</button>
+  </div>
+</aside>
 
 <script>
 "use strict";
@@ -498,6 +552,28 @@ async function api(path, body) {
   return r.json();
 }
 const status = t => $("status").textContent = t;
+
+/* ---------- Docker image update notification ---------- */
+async function checkForUpdate() {
+  try {
+    const response = await fetch("/api/update", { cache: "no-store" });
+    if (!response.ok) return;
+    const info = await response.json();
+    if (!info.update_available || typeof info.latest !== "string") return;
+    if (localStorage.getItem("dismissedUpdate") === info.latest) return;
+    $("updateVersion").textContent = info.latest;
+    $("updateToast").hidden = false;
+  } catch { /* update checks must never interrupt the editor */ }
+}
+
+function dismissUpdate() {
+  const version = $("updateVersion").textContent;
+  if (version) localStorage.setItem("dismissedUpdate", version);
+  $("updateToast").hidden = true;
+}
+
+$("updateDismiss").onclick = dismissUpdate;
+$("updateClose").onclick = dismissUpdate;
 
 /* ---------- error lens: live compile on idle ---------- */
 let lensT = null;
@@ -883,7 +959,8 @@ document.addEventListener("keydown", e => {
   if (e.key === "ArrowLeft") showStep(cur - 1);
 });
 
-applySplit(); renderTabs(); render(); lens();
+applySplit(); renderTabs(); render(); lens(); checkForUpdate();
+setInterval(checkForUpdate, 15 * 60 * 1000);
 </script>
 </body>
 </html>
