@@ -63,15 +63,20 @@
   .pane { flex:1; overflow:auto; display:none; min-height:0; }
   .pane.on { display:flex; flex-direction:column; }
 
-  /* output pane */
-  #stdin { background:var(--bg); color:var(--fg); border:1px solid var(--border);
-           border-radius:4px; font:12px var(--mono); padding:6px; width:100%;
-           height:52px; resize:vertical; }
-  #outpane { padding:10px; gap:8px; }
-  #output { flex:1; background:#111; border-radius:4px; padding:10px;
-            font:12px/1.5 var(--mono); white-space:pre-wrap; overflow:auto; }
+  /* output pane — live terminal */
+  #outpane { padding:10px; gap:0; }
+  #term { flex:1; display:flex; flex-direction:column; background:#111;
+          border-radius:4px; overflow:hidden; }
+  #output { flex:1; padding:10px; font:12px/1.5 var(--mono);
+            white-space:pre-wrap; overflow:auto; word-break:break-word; }
   #output .stderr { color:var(--err); }
   #output .meta { color:#6e7681; }
+  #cinrow { display:flex; align-items:center; gap:6px; padding:6px 10px;
+            border-top:1px solid var(--border); }
+  #cinrow::before { content:"›"; color:#6e7681; font:13px var(--mono); }
+  #cin { flex:1; background:transparent; color:var(--fg); border:0; outline:none;
+         font:12px var(--mono); }
+  #cin:disabled { opacity:.4; }
   label { font-size:11px; color:#9d9d9d; }
 
   /* memory pane */
@@ -84,6 +89,12 @@
   #vizout { background:#111; border-radius:4px; padding:8px 10px;
             font:12px/1.5 var(--mono); white-space:pre-wrap; max-height:110px;
             overflow:auto; flex:none; }
+  #vizinrow { display:flex; align-items:center; gap:6px; padding:4px 10px; flex:none;
+              background:#111; border-radius:4px; }
+  #vizinrow::before { content:"›"; color:#6e7681; font:13px var(--mono); }
+  #vizin { flex:1; background:transparent; color:var(--fg); border:0; outline:none;
+           font:12px var(--mono); }
+  #vizin:disabled { opacity:.4; }
   #mem { position:relative; flex:1; overflow:auto; }
   #arrows { position:absolute; inset:0; pointer-events:none; overflow:visible; }
   .frame { border:1px solid var(--border); border-radius:6px; margin-bottom:10px;
@@ -144,9 +155,10 @@
       <div id="tabMem">Memory</div>
     </div>
     <div id="outpane" class="pane on">
-      <label>stdin (program input)</label>
-      <textarea id="stdin" placeholder="input for scanf, one value per line"></textarea>
-      <div id="output"><span class="meta">Press ▶ Run (Cmd+Enter)</span></div>
+      <div id="term">
+        <div id="output"><span class="meta">Press ▶ Run (Cmd+Enter). Type into the prompt below while the program runs.</span></div>
+        <div id="cinrow"><input id="cin" placeholder="type input, press Enter" disabled></div>
+      </div>
     </div>
     <div id="mempane" class="pane">
       <div id="vizctl">
@@ -160,6 +172,7 @@
       </div>
       <div id="crash"></div>
       <div id="vizout"></div>
+      <div id="vizinrow"><input id="vizin" placeholder="program input — type when the trace stops waiting, press Enter" disabled></div>
       <div id="mem"><div id="memhint">Click 👁 Visualize to step through your program and watch variables & pointers.</div></div>
     </div>
   </div>
@@ -295,29 +308,56 @@ async function lens() {
   } catch { status("server offline?"); }
 }
 
-/* ---------- run ---------- */
-async function run() {
-  status("compiling…"); $("runBtn").disabled = true;
-  tab("out");
-  try {
-    const r = await api("/api/run", { code: ta.value, stdin: $("stdin").value });
-    diags = r.diags || []; render();
-    const o = $("output");
-    if (!r.ok) {
-      o.innerHTML = `<span class="stderr">compile failed — see error lens</span>`;
-      status("✗ compile error");
-    } else {
-      let h = esc(r.stdout || "");
-      if (r.stderr) h += `<span class="stderr">${esc(r.stderr)}</span>`;
-      h += r.timeout != null
-        ? `\n<span class="stderr">⏱ killed after ${r.timeout}s (infinite loop?)</span>`
-        : `\n<span class="meta">— exited with code ${r.exit}</span>`;
-      o.innerHTML = h;
-      status(r.timeout != null ? "⏱ timeout" : `exit ${r.exit}`);
-    }
-  } catch (e) { status("run failed: " + e.message); }
+/* ---------- run: live interactive terminal via SSE + pty ---------- */
+let es = null, curSid = null;
+const dec = new TextDecoder();
+function termWrite(s, cls) {
+  s = s.replace(/\r\n/g, "\n");           // pty sends CRLF; keep it clean in the browser
+  const o = $("output");
+  const atBottom = o.scrollHeight - o.scrollTop - o.clientHeight < 30;
+  o.insertAdjacentHTML("beforeend", cls ? `<span class="${cls}">${esc(s)}</span>` : esc(s));
+  if (atBottom) o.scrollTop = o.scrollHeight;
+}
+function endRun() {
+  if (es) { es.close(); es = null; }
+  curSid = null;
+  $("cin").disabled = true;
   $("runBtn").disabled = false;
 }
+
+async function run() {
+  if (es) endRun();                       // stop any previous run first
+  tab("out");
+  $("output").innerHTML = "";
+  status("compiling…"); $("runBtn").disabled = true;
+  try {
+    const r = await api("/api/start", { code: ta.value });
+    diags = r.diags || []; render();
+    if (!r.ok) {
+      termWrite("compile failed — see error lens", "stderr");
+      status("✗ compile error"); $("runBtn").disabled = false;
+      return;
+    }
+    curSid = r.sid;
+    status("running…");
+    $("cin").disabled = false; $("cin").focus();
+    es = new EventSource("/api/stream?sid=" + curSid);
+    es.onmessage = e => termWrite(dec.decode(Uint8Array.from(atob(e.data), c => c.charCodeAt(0))));
+    es.addEventListener("exit", e => {
+      termWrite(`\n— exited with code ${e.data}`, "meta");
+      status(`exit ${e.data}`); endRun();
+    });
+    es.onerror = () => { termWrite("\n— connection lost", "stderr"); status("disconnected"); endRun(); };
+  } catch (e) { status("run failed: " + e.message); $("runBtn").disabled = false; }
+}
+
+// send a line of input to the running program
+$("cin").addEventListener("keydown", e => {
+  if (e.key !== "Enter" || !curSid) return;
+  const line = e.target.value + "\n";
+  e.target.value = "";
+  api("/api/input", { sid: curSid, data: line });  // pty echoes it back into output
+});
 
 /* ---------- prettify ---------- */
 async function prettify() {
@@ -345,10 +385,17 @@ function prepHeap(steps) {
   }
 }
 
-async function visualize() {
-  status("tracing…"); $("vizBtn").disabled = true;
+// interactive trace: each input line re-runs the (deterministic) trace with all
+// input so far; playback resumes where the program stopped waiting, so it feels live
+let vizStdin = "";
+
+async function visualize(cont) {
+  if (es) { const s = curSid; endRun(); if (s) api("/api/stop", { sid: s }); }  // stop live run if any
+  if (!cont) vizStdin = "";
+  const resumeAt = cont && trace ? trace.steps.length - 1 : 0;
+  status("tracing…"); $("vizBtn").disabled = true; $("vizin").disabled = true;
   try {
-    const r = await api("/api/trace", { code: ta.value, stdin: $("stdin").value });
+    const r = await api("/api/trace", { code: ta.value, stdin: vizStdin });
     diags = r.diags || []; render();
     if (!r.ok || !r.steps || !r.steps.length) {
       status("✗ " + (r.error ? "trace failed" : "compile error"));
@@ -360,11 +407,24 @@ async function visualize() {
     prepHeap(r.steps);
     $("slider").max = r.steps.length - 1;
     tab("mem");
-    showStep(0);
-    status(`${r.steps.length} steps` + (r.truncated ? " (truncated)" : ""));
+    showStep(Math.min(resumeAt, r.steps.length - 1));
+    if (r.waiting_input) {
+      $("vizin").disabled = false;
+      if (cont) $("vizin").focus();
+      status("⌨ program waits for input — type below the output");
+    } else {
+      status(`${r.steps.length} steps` + (r.truncated ? " (truncated)" : ""));
+    }
   } catch (e) { status("trace failed: " + e.message); }
   $("vizBtn").disabled = false;
 }
+
+$("vizin").addEventListener("keydown", e => {
+  if (e.key !== "Enter" || e.target.disabled) return;
+  vizStdin += e.target.value + "\n";
+  e.target.value = "";
+  visualize(true);
+});
 
 // shorten 0x00007ffe… addresses for display; full value kept in title
 const short = s => /^0x[0-9a-fA-F]{7,}$/.test(s) ? "…" + s.slice(-4) : s;
@@ -537,7 +597,7 @@ $("tabOut").onclick = () => tab("out");
 $("tabMem").onclick = () => tab("mem");
 $("runBtn").onclick = run;
 $("fmtBtn").onclick = prettify;
-$("vizBtn").onclick = visualize;
+$("vizBtn").onclick = () => visualize(false);  // click event must not read as cont=true
 $("firstB").onclick = () => showStep(0);
 $("prevB").onclick = () => showStep(cur - 1);
 $("nextB").onclick = () => showStep(cur + 1);
@@ -550,7 +610,7 @@ $("bpB").onclick = () => {
 };
 $("slider").oninput = e => showStep(+e.target.value);
 document.addEventListener("keydown", e => {
-  if (!$("mempane").classList.contains("on") || e.target === ta || e.target.tagName === "TEXTAREA") return;
+  if (!$("mempane").classList.contains("on") || e.target === ta || e.target.tagName === "TEXTAREA" || e.target.tagName === "INPUT") return;
   if (e.key === "ArrowRight") showStep(cur + 1);
   if (e.key === "ArrowLeft") showStep(cur - 1);
 });

@@ -9,6 +9,23 @@ import lldb
 MAX_STEPS = 400
 INVALID = lldb.LLDB_INVALID_ADDRESS
 
+# stdin is a macro; the underlying symbol differs: glibc exports `stdin`,
+# macOS libc exports `__stdinp`. feof(stdin) turns true only after the
+# program tries to read past the input we gave it -> "waiting for input".
+FEOF_EXPRS = ["((int(*)(void*))feof)(*(void**)&stdin)",
+              "((int(*)(void*))feof)(*(void**)&__stdinp)"]
+_feof_expr = []
+
+
+def hit_stdin_eof(frame):
+    for e in _feof_expr or FEOF_EXPRS:
+        v = frame.EvaluateExpression(e)
+        if v.IsValid() and v.GetError().Success():
+            if not _feof_expr:
+                _feof_expr.append(e)
+            return v.GetValueAsSigned() != 0
+    return False
+
 
 def addr_of(v):
     a = v.GetLoadAddress()
@@ -139,6 +156,8 @@ def __lldb_init_module(debugger, internal_dict):
     steps = []
     crashed = False
     crash_reason = ""
+    waiting_input = False
+    detect_eof = os.environ.get("TRACE_DETECT_EOF") == "1"
     n = 0
     while process.IsValid() and process.GetState() == lldb.eStateStopped and n < MAX_STEPS:
         n += 1
@@ -152,6 +171,11 @@ def __lldb_init_module(debugger, internal_dict):
         frame = thread.GetFrameAtIndex(0)
         le = frame.GetLineEntry()
         in_src = le.IsValid() and le.GetFileSpec().GetFilename() == srcname
+        # program consumed all provided stdin and tried to read more ->
+        # stop here; the UI asks the user for the next line and re-traces
+        if detect_eof and in_src and not crashed and hit_stdin_eof(frame):
+            waiting_input = True
+            break
         if crashed or in_src:
             try:
                 with open(stdout_file, errors="replace") as f:
@@ -207,4 +231,5 @@ def __lldb_init_module(debugger, internal_dict):
     with open(outp, "w") as f:
         json.dump({"steps": steps, "exit": exit_code, "crashed": crashed,
                    "crash_reason": crash_reason, "stdout": final_out,
+                   "waiting_input": waiting_input,
                    "truncated": n >= MAX_STEPS}, f)
