@@ -19,29 +19,62 @@ from urllib.parse import urlparse, parse_qs
 PORT = int(os.environ.get("PORT", 8000))
 HOST = os.environ.get("HOST", "0.0.0.0")  # 0.0.0.0 for containers; see security note in DEPLOY.md
 HERE = os.path.dirname(os.path.abspath(__file__))
-ERR_RE = re.compile(r'^[^:\n]*prog\.c:(\d+):(\d+): (fatal error|error|warning|note): (.*)$', re.M)
+ERR_RE = re.compile(r'^[^:\n]*?([A-Za-z0-9._-]+\.[ch]):(\d+):(\d+): (fatal error|error|warning|note): (.*)$', re.M)
+FNAME_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$')  # rejects '/', '..', leading dot
 TRACE_TIMEOUT = 30
 # clang-format: bare binary on Linux, xcrun wrapper on macOS
 CLANG_FORMAT = ["clang-format"] if shutil.which("clang-format") else ["xcrun", "clang-format"]
 
 
-def compile_c(code, extra=()):
-    """Returns (tmpdir, binpath_or_None, diagnostics)."""
+def clean_files(body):
+    """{name: content} for the whole workspace; legacy single-file 'code' still works.
+    Names are validated (FNAME_RE) so nothing can escape the tmpdir."""
+    files = body.get("files") or {"prog.c": body.get("code", "")}
+    out = {n: str(c) for n, c in files.items()
+           if isinstance(n, str) and FNAME_RE.match(n)}
+    out.setdefault("prog.c", "")
+    return out
+
+
+def compile_c(files, extra=()):
+    """Returns (tmpdir, binpath_or_None, diagnostics). All *.c files compile together;
+    headers and data files just land in the dir so fopen() finds them."""
     d = tempfile.mkdtemp(prefix="cedit-")
-    src = os.path.join(d, "prog.c")
-    with open(src, "w") as f:
-        f.write(code)
+    for name, content in files.items():
+        with open(os.path.join(d, name), "w") as f:
+            f.write(content)
+    srcs = [os.path.join(d, n) for n in sorted(files) if n.endswith(".c")]
     binp = os.path.join(d, "prog")
     p = subprocess.run(
-        ["gcc", "-g", "-O0", "-Wall", "-fdiagnostics-color=never", *extra, src, "-o", binp],
+        ["gcc", "-g", "-O0", "-Wall", "-fdiagnostics-color=never", *extra, *srcs, "-o", binp],
         capture_output=True, text=True, timeout=30)
-    diags = [{"line": int(m[0]), "col": int(m[1]), "sev": m[2], "msg": m[3]}
+    diags = [{"file": m[0], "line": int(m[1]), "col": int(m[2]), "sev": m[3], "msg": m[4]}
              for m in ERR_RE.findall(p.stderr)]
     return d, (binp if p.returncode == 0 else None), diags
 
 
+SKIP_FILES = {"prog", "trace.json", "stdin.txt", "out.txt"}
+MAX_FILE_OUT = 65536
+
+
+def collect_new_files(d, submitted):
+    """Files the program created or modified — sent back to the editor as tabs."""
+    out = {}
+    for n in sorted(os.listdir(d)):
+        p = os.path.join(d, n)
+        if n in SKIP_FILES or not os.path.isfile(p) or not FNAME_RE.match(n):
+            continue
+        if os.path.getsize(p) > MAX_FILE_OUT:
+            continue  # ponytail: cap what we ship back; students' files are small
+        with open(p, errors="replace") as f:
+            content = f.read()
+        if submitted.get(n) != content:
+            out[n] = content
+    return out
+
+
 def api_compile(body):
-    d, binp, diags = compile_c(body.get("code", ""))
+    d, binp, diags = compile_c(clean_files(body))
     shutil.rmtree(d, ignore_errors=True)
     return {"ok": binp is not None, "diags": diags}
 
@@ -83,7 +116,8 @@ def _reap(sess):
 
 
 def api_start(body):
-    d, binp, diags = compile_c(body.get("code", ""), extra=("-include", PRELUDE_FILE))
+    files = clean_files(body)
+    d, binp, diags = compile_c(files, extra=("-include", PRELUDE_FILE))
     if binp is None:
         shutil.rmtree(d, ignore_errors=True)
         return {"ok": False, "diags": diags}
@@ -96,7 +130,8 @@ def api_start(body):
             os._exit(127)
     sid = uuid.uuid4().hex
     with SESSIONS_LOCK:
-        SESSIONS[sid] = {"pid": pid, "fd": fd, "start": time.time(), "dir": d}
+        SESSIONS[sid] = {"pid": pid, "fd": fd, "start": time.time(),
+                         "dir": d, "files": files}
     return {"ok": True, "sid": sid, "diags": diags}
 
 
@@ -130,7 +165,8 @@ def api_format(body):
 
 
 def api_trace(body):
-    d, binp, diags = compile_c(body.get("code", ""), extra=("-include", PRELUDE_FILE))
+    files = clean_files(body)
+    d, binp, diags = compile_c(files, extra=("-include", PRELUDE_FILE))
     try:
         if binp is None:
             return {"ok": False, "diags": diags}
@@ -139,7 +175,7 @@ def api_trace(body):
             f.write(body.get("stdin", ""))
         out_file = os.path.join(d, "trace.json")
         reads_stdin = re.search(r'\b(scanf|fgets|getchar|getline|gets|getc|fgetc)\s*\(',
-                                body.get("code", ""))
+                                "\n".join(files.values()))
         env = dict(os.environ,
                    TRACE_BIN=binp, TRACE_SRC="prog.c",
                    TRACE_OUT=out_file, TRACE_STDIN=stdin_file,
@@ -153,7 +189,8 @@ def api_trace(body):
                     "error": "lldb trace failed:\n" + p.stdout[-2000:] + p.stderr[-2000:]}
         with open(out_file) as f:
             trace = json.load(f)
-        trace.update(ok=True, diags=diags)
+        trace.update(ok=True, diags=diags,
+                     files_out=collect_new_files(d, files))
         return trace
     except subprocess.TimeoutExpired:
         return {"ok": False, "diags": diags, "error": "trace timed out (infinite loop?)"}
@@ -221,10 +258,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             pass  # browser closed the tab; fall through to cleanup
         with SESSIONS_LOCK:
             SESSIONS.pop(sid, None)
+        try:  # grab program-written files BEFORE _reap deletes the dir
+            new_files = collect_new_files(sess["dir"], sess.get("files", {}))
+        except OSError:
+            new_files = {}
         reaped = _reap(sess)          # always: kill-if-alive, close fd, rm tmpdir
         if code is None:
             code = reaped
         try:
+            if new_files:  # json.dumps escapes newlines -> safe as one SSE data line
+                self.wfile.write(("event: files\ndata: " + json.dumps(new_files) + "\n\n").encode())
             self.wfile.write(f"event: exit\ndata: {code}\n\n".encode())
             self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError):

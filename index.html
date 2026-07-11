@@ -23,6 +23,15 @@
   button:disabled { opacity:.5; cursor:default; }
   #status { margin-left:auto; font-size:12px; color:#9d9d9d; }
 
+  /* file tabs */
+  #ftabs { display:flex; gap:2px; margin-left:12px; overflow-x:auto; max-width:45vw; }
+  #ftabs .ft { padding:4px 10px; font:12px var(--mono); color:#9d9d9d; cursor:pointer;
+               border-radius:4px; white-space:nowrap; user-select:none; }
+  #ftabs .ft:hover { color:var(--fg); }
+  #ftabs .ft.on { background:var(--bg); color:var(--fg); }
+  #ftabs .ft .x { margin-left:6px; color:#6e7681; }
+  #ftabs .ft .x:hover { color:var(--err); }
+
   /* layout */
   #main { flex:1; display:flex; min-height:0; }
   #left { flex:1.2; display:flex; min-width:0; border-right:1px solid var(--border); }
@@ -139,6 +148,7 @@
   <button id="runBtn" title="Cmd+Enter">▶ Run</button>
   <button id="vizBtn" class="sec">👁 Visualize</button>
   <button id="fmtBtn" class="sec" title="Shift+Alt+F">✨ Prettify</button>
+  <span id="ftabs"></span>
   <span id="status"></span>
 </div>
 <div id="main">
@@ -188,7 +198,7 @@ const PALETTE = ["#e06c75","#61afef","#c678dd","#e5c07b","#56b6c2","#98c379"];
 
 let diags = [], vizLine = 0, trace = null, cur = 0, playTimer = null, prevVals = {}, prevCells = {};
 
-ta.value = localStorage.getItem("csrc") || `#include <stdio.h>
+const DEFAULT_C = `#include <stdio.h>
 
 int main(void) {
     int a = 5;
@@ -201,6 +211,59 @@ int main(void) {
     return 0;
 }
 `;
+
+/* ---------- multiple files: prog.c fixed, others (.h/.c/.txt) come and go ---------- */
+let files = null, curFile = "prog.c";
+try { files = JSON.parse(localStorage.getItem("cfiles")); } catch {}
+if (!files || typeof files !== "object" || typeof files["prog.c"] !== "string")
+  files = { "prog.c": localStorage.getItem("csrc") || DEFAULT_C };  // migrate old single-file storage
+ta.value = files[curFile];
+
+const isC = n => /\.[ch]$/.test(n);
+function saveFiles() {
+  files[curFile] = ta.value;
+  localStorage.setItem("cfiles", JSON.stringify(files));
+}
+function renderTabs() {
+  $("ftabs").innerHTML = Object.keys(files).map(n =>
+    `<span class="ft${n === curFile ? " on" : ""}" data-f="${esc(n)}">${esc(n)}` +
+    (n === "prog.c" ? "" : `<span class="x" data-x="${esc(n)}" title="delete">×</span>`) + `</span>`
+  ).join("") + `<span class="ft" id="ftadd" title="new file">＋</span>`;
+}
+function switchFile(n) {
+  if (!(n in files) || n === curFile) { renderTabs(); return; }
+  saveFiles();
+  curFile = n; ta.value = files[n];
+  vizLine = 0; bp.clear();  // breakpoints are line numbers of the old file
+  renderTabs(); render(); lensDebounced();
+}
+$("ftabs").addEventListener("click", e => {
+  const x = e.target.dataset.x;
+  if (x) {
+    if (!window.confirm(`Delete ${x}?`)) return;
+    delete files[x];
+    if (curFile === x) { curFile = "prog.c"; ta.value = files["prog.c"]; render(); }
+    saveFiles(); renderTabs(); return;
+  }
+  if (e.target.id === "ftadd") {
+    const n = (window.prompt("File name (e.g. list.h, util.c, data.txt):") || "").trim();
+    if (!n) return;
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(n)) { status("bad file name"); return; }
+    if (!(n in files)) files[n] = "";
+    saveFiles(); switchFile(n); return;
+  }
+  const f = e.target.closest("[data-f]")?.dataset.f;
+  if (f) switchFile(f);
+});
+function allFiles() { saveFiles(); return files; }
+function mergeFiles(nf) {  // files the program wrote come back as editor tabs
+  const names = Object.keys(nf || {});
+  if (!names.length) return;
+  Object.assign(files, nf);
+  if (curFile in nf) ta.value = files[curFile];
+  saveFiles(); renderTabs();
+  status("📄 program wrote: " + names.join(", "));
+}
 
 /* ---------- syntax highlighting (tiny C tokenizer) ---------- */
 const C_KW = new Set("if else for while do return switch case break continue default goto sizeof typedef struct union enum static const extern register volatile inline auto".split(" "));
@@ -242,17 +305,20 @@ function render() {
   const lines = ta.value.split("\n");
   const byLine = {};
   for (const d of diags) {
+    if (d.file && d.file !== curFile) continue;  // show diags on the file they belong to
     const sev = d.sev.includes("error") ? "err" : d.sev === "warning" ? "warn" : null;
     if (!sev) continue;
     if (!byLine[d.line] || byLine[d.line].sev === "warn")
       byLine[d.line] = { sev, msg: d.msg };
   }
   let inC = false;
+  const hl = isC(curFile);  // .txt and friends render plain
   overlay.innerHTML = lines.map((l, i) => {
     const n = i + 1, d = byLine[n];
     const cls = "ln" + (d ? " " + d.sev : "") + (n === vizLine ? " cur" : "");
     const msg = d ? `<span class="msg">⟵ ${esc(d.msg)}</span>` : "";
-    let code; [code, inC] = hlLine(l, inC);
+    let code;
+    if (hl) [code, inC] = hlLine(l, inC); else code = esc(l);
     return `<div class="${cls}">${code}${msg}</div>`;
   }).join("");
   gutter.innerHTML = lines.map((_, i) => {
@@ -273,7 +339,7 @@ function syncScroll() {
 }
 ta.addEventListener("scroll", syncScroll);
 ta.addEventListener("input", () => {
-  localStorage.setItem("csrc", ta.value);
+  saveFiles();
   vizLine = 0; render(); lensDebounced();
 });
 ta.addEventListener("keydown", e => {
@@ -301,7 +367,7 @@ let lensT = null;
 function lensDebounced() { clearTimeout(lensT); lensT = setTimeout(lens, 700); }
 async function lens() {
   try {
-    const r = await api("/api/compile", { code: ta.value });
+    const r = await api("/api/compile", { files: allFiles() });
     diags = r.diags || []; render();
     const errs = diags.filter(d => d.sev.includes("error")).length;
     status(errs ? `✗ ${errs} error(s)` : "✓ compiles");
@@ -331,7 +397,7 @@ async function run() {
   $("output").innerHTML = "";
   status("compiling…"); $("runBtn").disabled = true;
   try {
-    const r = await api("/api/start", { code: ta.value });
+    const r = await api("/api/start", { files: allFiles() });
     diags = r.diags || []; render();
     if (!r.ok) {
       termWrite("compile failed — see error lens", "stderr");
@@ -343,6 +409,7 @@ async function run() {
     $("cin").disabled = false; $("cin").focus();
     es = new EventSource("/api/stream?sid=" + curSid);
     es.onmessage = e => termWrite(dec.decode(Uint8Array.from(atob(e.data), c => c.charCodeAt(0))));
+    es.addEventListener("files", e => mergeFiles(JSON.parse(e.data)));
     es.addEventListener("exit", e => {
       termWrite(`\n— exited with code ${e.data}`, "meta");
       status(`exit ${e.data}`); endRun();
@@ -361,6 +428,7 @@ $("cin").addEventListener("keydown", e => {
 
 /* ---------- prettify ---------- */
 async function prettify() {
+  if (!isC(curFile)) { status("format is for .c/.h files"); return; }
   const r = await api("/api/format", { code: ta.value });
   if (!r.ok) { status("format failed"); return; }
   const pos = ta.selectionStart;
@@ -392,10 +460,11 @@ let vizStdin = "";
 async function visualize(cont) {
   if (es) { const s = curSid; endRun(); if (s) api("/api/stop", { sid: s }); }  // stop live run if any
   if (!cont) vizStdin = "";
+  if (curFile !== "prog.c") switchFile("prog.c");  // trace steps refer to prog.c lines
   const resumeAt = cont && trace ? trace.steps.length - 1 : 0;
   status("tracing…"); $("vizBtn").disabled = true; $("vizin").disabled = true;
   try {
-    const r = await api("/api/trace", { code: ta.value, stdin: vizStdin });
+    const r = await api("/api/trace", { files: allFiles(), stdin: vizStdin });
     diags = r.diags || []; render();
     if (!r.ok || !r.steps || !r.steps.length) {
       status("✗ " + (r.error ? "trace failed" : "compile error"));
@@ -404,6 +473,7 @@ async function visualize(cont) {
       return;
     }
     trace = r; cur = 0; prevVals = {}; prevCells = {};
+    mergeFiles(r.files_out);
     prepHeap(r.steps);
     $("slider").max = r.steps.length - 1;
     tab("mem");
@@ -615,7 +685,7 @@ document.addEventListener("keydown", e => {
   if (e.key === "ArrowLeft") showStep(cur - 1);
 });
 
-render(); lens();
+renderTabs(); render(); lens();
 </script>
 </body>
 </html>
