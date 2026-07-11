@@ -98,6 +98,10 @@
   #vizout { background:#111; border-radius:4px; padding:8px 10px;
             font:12px/1.5 var(--mono); white-space:pre-wrap; max-height:110px;
             overflow:auto; flex:none; }
+  #narr { flex:none; background:rgba(55,148,255,.10); border-left:3px solid #3794ff;
+          border-radius:4px; padding:7px 10px; font-size:13px; line-height:1.5; min-height:20px; }
+  #narr b { color:#3794ff; }
+  #legend { flex:none; font-size:11px; color:#6e7681; padding:2px 2px 0; }
   #vizinrow { display:flex; align-items:center; gap:6px; padding:4px 10px; flex:none;
               background:#111; border-radius:4px; }
   #vizinrow::before { content:"›"; color:#6e7681; font:13px var(--mono); }
@@ -181,9 +185,11 @@
         <span id="stepinfo">–</span>
       </div>
       <div id="crash"></div>
+      <div id="narr"></div>
       <div id="vizout"></div>
       <div id="vizinrow"><input id="vizin" placeholder="program input — type when the trace stops waiting, press Enter" disabled></div>
       <div id="mem"><div id="memhint">Click 👁 Visualize to step through your program and watch variables & pointers.</div></div>
+      <div id="legend">highlighted line = runs next · gold glow = just changed · pointer arrow: ● = the pointer, ▶ = what it points to (hover a pointer to spotlight its arrow) · faded box = freed memory</div>
     </div>
   </div>
 </div>
@@ -548,6 +554,39 @@ function heapNode(addr, node, live) {
   return h + `</div>`;
 }
 
+// plain-English "what just happened" line, built by diffing this step against the previous
+function narrate(prev, st, idx) {
+  if (st.crashed) return "💥 The program <b>crashed</b> here — it touched memory it doesn't own.";
+  const bits = [];
+  const cf = st.frames.map(f => f.func), pf = prev ? prev.frames.map(f => f.func) : [];
+  if (!prev) bits.push("▶ Program starts — <b>main()</b> begins running");
+  else if (cf.length > pf.length) bits.push(`📞 <b>main</b>${cf.slice(1).map(f => " → <b>" + esc(f) + "</b>").join("")} — function called, new local variables appear`);
+  else if (cf.length < pf.length) bits.push(`↩ <b>${esc(pf[pf.length - 1])}()</b> finished and returned — back in <b>${esc(cf[cf.length - 1])}()</b>`);
+  if (prev) {
+    const ph = prev.heap || {}, ch = st.heap || {};
+    const born = Object.keys(ch).filter(a => !(a in ph));
+    if (born.length) bits.push(`📦 <b>${esc(ch[born[0]].type)}</b> allocated on the heap (malloc/calloc)`);
+    else if (Object.keys(ph).some(a => !(a in ch))) bits.push("🗑 a heap block was freed (or nothing points to it anymore)");
+    const pv = {};
+    for (const f of prev.frames) for (const v of f.vars) pv[f.func + "." + v.name] = JSON.stringify([v.value, v.children]);
+    const chg = [];
+    for (const f of st.frames) for (const v of f.vars) {
+      const k = f.func + "." + v.name;
+      if (pv[k] !== undefined && pv[k] !== JSON.stringify([v.value, v.children])) chg.push(v);
+    }
+    for (const v of chg.slice(0, 2))
+      bits.push(v.ptr ? `<b>${esc(v.name)}</b> now points to ${esc(short(String(v.value)))}`
+              : v.children ? `<b>${esc(v.name)}</b> changed`
+              : `<b>${esc(v.name)}</b> = ${esc(short(String(v.value)))}`);
+    const out = (st.stdout || "").slice((prev.stdout || "").length).trim();
+    if (out) bits.push(`🖨 printed “${esc(out.length > 44 ? out.slice(0, 44) + "…" : out)}”`);
+  }
+  if (!bits.length) bits.push(`line ${st.line} runs next`);
+  if (trace.waiting_input && idx === trace.steps.length - 1)
+    bits.push("⌨ <b>waiting for input</b> — type in the box below");
+  return bits.join(" &nbsp;·&nbsp; ");
+}
+
 function showStep(i) {
   if (!trace) return;
   cur = Math.max(0, Math.min(i, trace.steps.length - 1));
@@ -558,6 +597,7 @@ function showStep(i) {
   const crashNow = st.crashed;
   $("crash").style.display = crashNow ? "block" : "none";
   if (crashNow) $("crash").textContent = "💥 CRASH: " + (trace.crash_reason || "bad memory access");
+  $("narr").innerHTML = narrate(trace.steps[cur - 1], st, cur);
 
   // highlight source line + scroll to it
   vizLine = st.line; render();
@@ -573,15 +613,20 @@ function showStep(i) {
     if (v.ptr) colors[f.func + "." + v.name] = PALETTE[ci++ % PALETTE.length];
   const snap = heapSnap[cur] || {};
   const heapHtml = Object.keys(snap).length
-    ? `<div class="heaphdr">Heap / pointed-to memory</div><div id="heap">` +
+    ? `<div class="heaphdr">HEAP — memory made by malloc/calloc (arrows show which pointer owns what)</div><div id="heap">` +
       Object.entries(snap).sort((a, b) => heapSeq[a[0]] - heapSeq[b[0]])
         .map(([a, e]) => heapNode(a, e.node, e.live)).join("") + `</div>`
     : "";
-  $("mem").innerHTML = `<svg id="arrows"></svg>` + st.frames.map((f, fi) =>
-    `<div class="frame ${fi === st.frames.length - 1 ? "top" : ""}">
-       <div class="fhead">${esc(f.func)}( ) — line ${f.line}</div>
-       <div class="fvars">${f.vars.map(v => varBox(v, colors[f.func + "." + v.name])).join("")}</div>
-     </div>`).join("") + heapHtml;
+  $("mem").innerHTML = `<svg id="arrows"></svg>` +
+    `<div class="heaphdr">STACK — each box below = one function that is currently running, with its variables</div>` +
+    st.frames.map((f, fi) => {
+      const top = fi === st.frames.length - 1;
+      const vars = f.func === "main" ? f.vars.filter(v => v.name !== "argc" && v.name !== "argv") : f.vars;  // beginner noise
+      return `<div class="frame ${top ? "top" : ""}">
+       <div class="fhead">${esc(f.func)}( ) — line ${f.line}${top ? " &nbsp;⟵ running now" : ""}</div>
+       <div class="fvars">${vars.map(v => varBox(v, colors[f.func + "." + v.name])).join("")}</div>
+     </div>`;
+    }).join("") + heapHtml;
 
   // changed-value glow (whole boxes)
   const nowVals = {};
@@ -614,36 +659,58 @@ function showStep(i) {
 function drawArrows(colors, st) {
   const mem = $("mem"), svg = $("arrows");
   const mr = mem.getBoundingClientRect();
-  let paths = "";
+  let out = "", ai = 0;
   document.querySelectorAll("[data-ptr]").forEach(pb => {
     const target = pb.getAttribute("data-ptr");
     if (!target) return;
     const tb = [...document.querySelectorAll("[data-addr]")].find(e => e !== pb && e.getAttribute("data-addr") === target);
+    if (!tb) return;  // ponytail: no visual for unmatched pointers — the box already shows the raw address
     const color = pb.style.borderColor || "#61afef";
     const pr = pb.getBoundingClientRect();
     const x1 = pr.right - mr.left + mem.scrollLeft, y1 = pr.top + pr.height / 2 - mr.top + mem.scrollTop;
-    if (tb) {
-      const tr = tb.getBoundingClientRect();
-      const y2 = tr.top - mr.top + mem.scrollTop + Math.min(tr.height / 2, 14);
-      let x2, d;
-      if (tr.left - mr.left + mem.scrollLeft > x1 + 12) {
-        // target to the right (typical linked-list chain): source right → target left
-        x2 = tr.left - mr.left + mem.scrollLeft;
-        d = `M ${x1} ${y1} C ${x1 + 24} ${y1}, ${x2 - 24} ${y2}, ${x2 - 3} ${y2}`;
-      } else {
-        // target left/above/below: loop around via the right side
-        x2 = tr.right - mr.left + mem.scrollLeft;
-        const bend = 34 + Math.min(40, Math.abs(y2 - y1) / 6);
-        d = `M ${x1} ${y1} C ${x1 + bend} ${y1}, ${x2 + bend} ${y2}, ${x2 + 3} ${y2}`;
-      }
-      paths += `<path d="${d}" fill="none" stroke="${color}" stroke-width="2"/>
-                <circle cx="${x2 + (x2 < x1 ? 3 : -1)}" cy="${y2}" r="3.5" fill="${color}"/>`;
+    const tr = tb.getBoundingClientRect();
+    const y2 = tr.top - mr.top + mem.scrollTop + Math.min(tr.height / 2, 14);
+    let x2, d, head;
+    if (tr.left - mr.left + mem.scrollLeft > x1 + 12) {
+      // target to the right (typical linked-list chain): source right → target left edge
+      x2 = tr.left - mr.left + mem.scrollLeft;
+      d = `M ${x1} ${y1} C ${x1 + 24} ${y1}, ${x2 - 24} ${y2}, ${x2 - 9} ${y2}`;
+      head = `M ${x2 - 1} ${y2} l -9 -4.5 l 0 9 z`;   // ▶ into the left edge
+    } else {
+      // target left/above/below: loop around via the right side
+      x2 = tr.right - mr.left + mem.scrollLeft;
+      const bend = 34 + Math.min(40, Math.abs(y2 - y1) / 6);
+      d = `M ${x1} ${y1} C ${x1 + bend} ${y1}, ${x2 + bend} ${y2}, ${x2 + 9} ${y2}`;
+      head = `M ${x2 + 1} ${y2} l 9 -4.5 l 0 9 z`;    // ◀ into the right edge
     }
-    // ponytail: no visual for unmatched pointers — the box already shows the raw address
+    // dot = where the pointer variable lives, arrowhead = the memory it points to
+    pb.setAttribute("data-ai", ai);
+    out += `<g data-ai="${ai++}" opacity="0.85">
+      <path d="${d}" fill="none" stroke="${color}" stroke-width="2"/>
+      <circle cx="${x1}" cy="${y1}" r="3" fill="${color}"/>
+      <path d="${head}" fill="${color}"/></g>`;
   });
   svg.setAttribute("width", mem.scrollWidth); svg.setAttribute("height", mem.scrollHeight);
-  svg.innerHTML = paths;
+  svg.innerHTML = out;
 }
+
+// hover a pointer box -> its arrow pops, all others fade (boxes re-render per step, so delegate)
+$("mem").addEventListener("mouseover", e => {
+  const pb = e.target.closest("[data-ai]");
+  if (!pb) return;
+  document.querySelectorAll("#arrows g").forEach(g => {
+    const mine = g.getAttribute("data-ai") === pb.getAttribute("data-ai");
+    g.setAttribute("opacity", mine ? "1" : "0.1");
+    g.querySelector("path").setAttribute("stroke-width", mine ? "3.5" : "2");
+  });
+});
+$("mem").addEventListener("mouseout", e => {
+  if (!e.target.closest("[data-ai]")) return;
+  document.querySelectorAll("#arrows g").forEach(g => {
+    g.setAttribute("opacity", "0.85");
+    g.querySelector("path").setAttribute("stroke-width", "2");
+  });
+});
 
 function play() {
   if (playTimer) { clearInterval(playTimer); playTimer = null; $("playB").textContent = "▶ Play"; return; }
