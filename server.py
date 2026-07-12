@@ -119,6 +119,18 @@ def clean_files(body):
     return out
 
 
+def compiler_diagnostics(stderr, returncode):
+    """Parse source diagnostics and preserve linker/runtime failures verbatim."""
+    diags = [{"file": m[0], "line": int(m[1]), "col": int(m[2]),
+              "sev": m[3], "msg": m[4]}
+             for m in ERR_RE.findall(stderr)]
+    if returncode and not diags:
+        message = stderr.strip()[-4000:] or f"gcc exited with status {returncode}"
+        diags.append({"file": "prog.c", "line": 1, "col": 1,
+                      "sev": "error", "msg": message})
+    return diags
+
+
 def compile_c(files, extra=()):
     """Returns (tmpdir, binpath_or_None, diagnostics). All *.c files compile together;
     headers and data files just land in the dir so fopen() finds them."""
@@ -131,13 +143,54 @@ def compile_c(files, extra=()):
     p = subprocess.run(
         ["gcc", "-g", "-O0", "-Wall", "-fdiagnostics-color=never", *extra, *srcs, "-o", binp],
         capture_output=True, text=True, timeout=30)
-    diags = [{"file": m[0], "line": int(m[1]), "col": int(m[2]), "sev": m[3], "msg": m[4]}
-             for m in ERR_RE.findall(p.stderr)]
+    diags = compiler_diagnostics(p.stderr, p.returncode)
+    if p.returncode:
+        print(f"gcc failed with status {p.returncode}: {p.stderr[-4000:]}",
+              file=sys.stderr, flush=True)
     return d, (binp if p.returncode == 0 else None), diags
 
 
 SKIP_FILES = {"prog", "trace.json", "stdin.txt", "out.txt"}
 MAX_FILE_OUT = 65536
+MAX_REQUEST_BODY = 2 * 1024 * 1024
+
+
+def read_http_body(stream, headers):
+    """Read fixed-length or chunked request bodies from container proxies."""
+    length = headers.get("Content-Length")
+    if length is not None:
+        size = int(length)
+        if size > MAX_REQUEST_BODY:
+            raise ValueError("request body too large")
+        return stream.read(size)
+
+    encodings = {value.strip().lower() for value in
+                 headers.get("Transfer-Encoding", "").split(",")}
+    if "chunked" not in encodings:
+        return b""
+
+    chunks = []
+    total = 0
+    while True:
+        line = stream.readline()
+        if not line:
+            raise ValueError("incomplete chunked request body")
+        try:
+            size = int(line.split(b";", 1)[0].strip(), 16)
+        except ValueError as error:
+            raise ValueError("invalid chunk size") from error
+        if size == 0:
+            while stream.readline() not in (b"\r\n", b"\n", b""):
+                pass  # consume optional trailers
+            break
+        total += size
+        if total > MAX_REQUEST_BODY:
+            raise ValueError("request body too large")
+        chunk = stream.read(size)
+        if len(chunk) != size or stream.read(2) != b"\r\n":
+            raise ValueError("incomplete chunked request body")
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 def collect_new_files(d, submitted):
@@ -174,6 +227,7 @@ with open(PRELUDE_FILE, "w") as _f:
 SESSIONS = {}                    # sid -> {"pid", "fd", "start", "dir"}
 SESSIONS_LOCK = threading.Lock()
 RUN_CAP = 120                    # ponytail: hard wall-clock cap; a run can't outlive this
+INLINE_RUN_TIMEOUT = 5           # stateless Vercel fallback must finish in one request
 UNPRIVILEGED_UID = 65534         # nobody/nogroup in the Ubuntu container
 UNPRIVILEGED_GID = 65534
 
@@ -195,6 +249,37 @@ def prepare_execution_dir(workdir):
         for name in dirs + files:
             os.chown(os.path.join(root, name), UNPRIVILEGED_UID, UNPRIVILEGED_GID)
     return (UNPRIVILEGED_UID, UNPRIVILEGED_GID)
+
+
+def run_compiled_inline(body, files, workdir, binp, diags):
+    """Run once for stateless container platforms that cannot retain PTY sessions."""
+    identity = prepare_execution_dir(workdir)
+    privilege_args = {}
+    if identity:
+        uid, gid = identity
+        privilege_args = {"user": uid, "group": gid, "extra_groups": ()}
+    try:
+        process = subprocess.run(
+            [binp], cwd=workdir, env=program_env(workdir),
+            input=body.get("stdin", ""), capture_output=True, text=True,
+            timeout=INLINE_RUN_TIMEOUT, **privilege_args)
+        return {"ok": True, "inline": True, "diags": diags,
+                "stdout": process.stdout, "stderr": process.stderr,
+                "exit": process.returncode,
+                "files_out": collect_new_files(workdir, files)}
+    except subprocess.TimeoutExpired as error:
+        stdout = error.stdout or ""
+        stderr = error.stderr or ""
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode(errors="replace")
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode(errors="replace")
+        return {"ok": True, "inline": True, "diags": diags,
+                "stdout": stdout, "stderr": stderr,
+                "exit": None, "error": "program timed out after 5 seconds",
+                "files_out": collect_new_files(workdir, files)}
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
 
 
 def _reap(sess):
@@ -225,6 +310,8 @@ def api_start(body):
     if binp is None:
         shutil.rmtree(d, ignore_errors=True)
         return {"ok": False, "diags": diags}
+    if os.environ.get("VERCEL") or os.environ.get("VERCEL_ENV"):
+        return run_compiled_inline(body, files, d, binp, diags)
     identity = prepare_execution_dir(d)
     pid, fd = pty.fork()
     if pid == 0:                          # child: become the student's program
@@ -419,9 +506,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if not fn:
             self.send_error(404)
             return
-        n = int(self.headers.get("Content-Length", 0))
         try:
-            body = json.loads(self.rfile.read(n) or b"{}")
+            body = json.loads(read_http_body(self.rfile, self.headers) or b"{}")
             resp = fn(body)
         except Exception as e:  # surface any backend failure to the UI
             resp = {"ok": False, "error": str(e)}

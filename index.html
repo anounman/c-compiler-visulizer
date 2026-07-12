@@ -617,6 +617,16 @@ async function run() {
       status("✗ compile error"); $("runBtn").disabled = false;
       return;
     }
+    if (r.inline) {
+      if (r.stdout) termWrite(r.stdout);
+      if (r.stderr) termWrite(r.stderr, "stderr");
+      if (r.error) termWrite("\n" + r.error, "stderr");
+      mergeFiles(r.files_out);
+      termWrite(`\n— exited with code ${r.exit}`, "meta");
+      status(r.error ? "timed out" : `exit ${r.exit}`);
+      endRun();
+      return;
+    }
     curSid = r.sid;
     status("running…");
     $("cin").disabled = false; $("cin").focus();

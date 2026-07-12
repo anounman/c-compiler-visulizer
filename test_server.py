@@ -130,5 +130,58 @@ class ExecutionIsolationTests(unittest.TestCase):
         })
 
 
+class CompilerDiagnosticTests(unittest.TestCase):
+    def test_source_diagnostic_is_parsed(self):
+        result = server.compiler_diagnostics(
+            "/tmp/prog.c:3:7: error: expected expression\n", 1)
+        self.assertEqual(result[0]["file"], "prog.c")
+        self.assertEqual(result[0]["line"], 3)
+        self.assertEqual(result[0]["msg"], "expected expression")
+
+    def test_linker_failure_is_not_discarded(self):
+        result = server.compiler_diagnostics(
+            "collect2: fatal error: cannot find 'ld'\n", 1)
+        self.assertEqual(result, [{
+            "file": "prog.c", "line": 1, "col": 1, "sev": "error",
+            "msg": "collect2: fatal error: cannot find 'ld'",
+        }])
+
+
+class RequestBodyTests(unittest.TestCase):
+    def test_reads_content_length_body(self):
+        stream = io.BytesIO(b'{"code":"ok"}')
+        result = server.read_http_body(stream, {"Content-Length": "13"})
+        self.assertEqual(result, b'{"code":"ok"}')
+
+    def test_reads_chunked_body_from_container_proxy(self):
+        stream = io.BytesIO(
+            b'7\r\n{"code"\r\n6\r\n:"ok"}\r\n0\r\n\r\n')
+        result = server.read_http_body(stream, {"Transfer-Encoding": "chunked"})
+        self.assertEqual(result, b'{"code":"ok"}')
+
+    def test_rejects_oversized_body(self):
+        with self.assertRaisesRegex(ValueError, "too large"):
+            server.read_http_body(io.BytesIO(), {
+                "Content-Length": str(server.MAX_REQUEST_BODY + 1),
+            })
+
+
+class StatelessRunTests(unittest.TestCase):
+    def test_vercel_run_returns_output_without_a_session(self):
+        workdir = tempfile.mkdtemp(prefix="cedit-inline-test-")
+        completed = Mock(stdout="hello\n", stderr="", returncode=0)
+        with patch.dict(server.os.environ, {"VERCEL": "1"}, clear=False), \
+             patch.object(server, "compile_c", return_value=(
+                 workdir, os.path.join(workdir, "prog"), [])), \
+             patch.object(server, "prepare_execution_dir", return_value=None), \
+             patch.object(server.subprocess, "run", return_value=completed):
+            result = server.api_start({"code": "int main(void) { return 0; }"})
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["inline"])
+        self.assertEqual(result["stdout"], "hello\n")
+        self.assertEqual(result["exit"], 0)
+        self.assertNotIn("sid", result)
+
+
 if __name__ == "__main__":
     unittest.main()

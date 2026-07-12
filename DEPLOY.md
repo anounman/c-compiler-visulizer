@@ -60,12 +60,12 @@ reduces credential exposure but is not a complete sandbox.
 
 ### Vercel runtime caveat
 
-Compile, format, and visualization are self-contained requests. Interactive Run uses an
-in-memory session followed by a separate event-stream request. Container Functions are
-stateless and autoscale, so interactive sessions are suitable only for a small protected
-preview and are not guaranteed when multiple instances are active. A public multi-user
-release should move each execution into Vercel Sandbox and persist the sandbox/session ID
-outside the Function process.
+Compile, format, visualization, and Run are self-contained requests on Vercel. Run uses a
+five-second inline fallback because an in-memory process and a later event-stream request
+can land on different autoscaled instances. This means Vercel Run is non-interactive;
+Docker/local deployments retain the live PTY terminal. A public multi-user release should
+move each execution into Vercel Sandbox and persist the sandbox/session ID outside the
+Function process.
 
 ## Build & run
 
