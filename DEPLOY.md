@@ -6,16 +6,21 @@ Single Docker image serves frontend + backend (gcc, lldb, clang-format).
 ## Build & run
 
 ```sh
-docker build -t cedit .
-docker run -d -p 8000:8000 \
-  --cap-add=SYS_PTRACE --security-opt seccomp=unconfined \
-  cedit
+docker compose up --build -d
 ```
 
 Open http://localhost:8000
 
-`--cap-add=SYS_PTRACE` + `--security-opt seccomp=unconfined` are **required** — lldb
-attaches to the traced program with ptrace, which Docker's default sandbox blocks.
+The Compose service always uses `127.0.0.1:8000`, chooses its container name, and
+uses Docker's default security profile. LLDB keeps ASLR enabled and traces only the
+program it launches, so `SYS_PTRACE` and `seccomp=unconfined` are not required on a
+standard Docker installation.
+
+For the published image without Compose:
+
+```sh
+docker run --rm -p 127.0.0.1:8000:8000 anounman/c-editor:latest
+```
 
 ## ⚠️ Security — do not expose this publicly as-is
 
@@ -26,12 +31,12 @@ no auth, no per-user isolation, no resource cap beyond the 5s run / 30s trace ti
 Safe uses: localhost, a classroom LAN, or behind auth (reverse proxy with a password /
 VPN / SSO). Do **not** put it on the open internet.
 
-## Hosting (any Docker host with ptrace)
+## Hosting
 
-- **Fly.io** — `fly launch` (uses this Dockerfile), Firecracker VMs allow ptrace natively.
+- **Fly.io** — `fly launch` (uses this Dockerfile), Firecracker VMs allow child tracing.
   Put it behind Fly's auth or an `[http_service]` with access control.
-- **Railway / Render** — deploy the Dockerfile. Confirm the platform grants SYS_PTRACE;
-  some managed runners block it. If trace fails but run works, ptrace is blocked.
+- **Railway / Render** — deploy the Dockerfile. Some hardened managed runners block all
+  debugging calls. If trace fails but run works, child tracing is blocked.
 - **A plain VM** (Hetzner, EC2, a spare box) — the `docker run` above, firewalled to
   your users.
 

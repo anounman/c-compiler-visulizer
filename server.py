@@ -242,6 +242,13 @@ def api_trace(body):
                     "error": "lldb trace failed:\n" + p.stdout[-2000:] + p.stderr[-2000:]}
         with open(out_file) as f:
             trace = json.load(f)
+        if trace.get("error"):
+            return {"ok": False, "diags": diags,
+                    "error": "LLDB could not start the program:\n" + trace["error"]}
+        if not trace.get("steps"):
+            return {"ok": False, "diags": diags,
+                    "error": "No executable lines in prog.c were reached. "
+                             "Make sure prog.c contains the code called from main()."}
         trace.update(ok=True, diags=diags,
                      files_out=collect_new_files(d, files))
         return trace

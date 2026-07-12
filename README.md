@@ -23,16 +23,23 @@ Docker is the most reproducible way to run the complete application.
 ```sh
 git clone https://github.com/anounman/c-compiler-visulizer.git
 cd c-compiler-visulizer
-docker build -t c-compiler-visualizer .
-docker run --rm -p 8000:8000 \
-  --cap-add=SYS_PTRACE \
-  --security-opt seccomp=unconfined \
-  c-compiler-visualizer
+docker compose up --build -d
 ```
 
 Open [http://localhost:8000](http://localhost:8000).
 
-LLDB needs `ptrace` access to trace the compiled program, so both Docker security options are required. Compile and run may still work without them, but visualization will fail.
+Compose always publishes the application on local port `8000` and creates the
+container name automatically. The visualizer works with Docker's normal security
+profile; no privileged container or extra ptrace capability is needed.
+
+To run the published image directly instead of cloning the repository:
+
+```sh
+docker run --rm -p 127.0.0.1:8000:8000 anounman/c-editor:latest
+```
+
+Docker images can declare their internal port but cannot force a host-port mapping.
+Use the Compose command above when you do not want to provide any run settings.
 
 ## Run locally
 
@@ -166,7 +173,17 @@ These bounds keep the teaching UI responsive; they are not a security sandbox.
 
 **Visualization fails in Docker**
 
-Run the container with `--cap-add=SYS_PTRACE --security-opt seccomp=unconfined`. Some managed container platforms prohibit debugger access even when regular execution works.
+Pull the current multi-platform image and recreate the container. The standard image
+keeps ASLR enabled so LLDB can trace under Docker's default security profile:
+
+```sh
+docker compose pull
+docker compose up -d --force-recreate
+```
+
+Some hardened managed platforms block all debugging system calls. On those platforms,
+regular compilation can work while visualization remains unavailable; use a Docker host
+that permits a process to trace its own child processes.
 
 **The UI says `server offline?`**
 

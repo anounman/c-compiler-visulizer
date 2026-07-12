@@ -1,7 +1,9 @@
 import io
 import json
+import os
+import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import server
 
@@ -63,6 +65,34 @@ class UpdateCheckTests(unittest.TestCase):
         self.assertFalse(first["update_available"])
         self.assertEqual(second, first)
         fetch.assert_called_once()
+
+
+class TraceFailureTests(unittest.TestCase):
+    def api_trace_with(self, trace_payload):
+        workdir = tempfile.mkdtemp(prefix="cedit-test-")
+
+        def fake_lldb(*args, **kwargs):
+            with open(kwargs["env"]["TRACE_OUT"], "w") as output:
+                json.dump(trace_payload, output)
+            return Mock(stdout="", stderr="")
+
+        with patch.object(server, "compile_c",
+                          return_value=(workdir, os.path.join(workdir, "prog"), [])), \
+             patch.object(server.subprocess, "run", side_effect=fake_lldb):
+            return server.api_trace({"code": "int main(void) { return 0; }"})
+
+    def test_lldb_launch_error_is_not_reported_as_compile_error(self):
+        result = self.api_trace_with({
+            "steps": [],
+            "error": "personality set failed: Operation not permitted",
+        })
+        self.assertFalse(result["ok"])
+        self.assertIn("LLDB could not start", result["error"])
+
+    def test_empty_trace_has_an_actionable_error(self):
+        result = self.api_trace_with({"steps": [], "error": ""})
+        self.assertFalse(result["ok"])
+        self.assertIn("No executable lines", result["error"])
 
 
 if __name__ == "__main__":

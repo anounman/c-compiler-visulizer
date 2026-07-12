@@ -146,12 +146,18 @@ def __lldb_init_module(debugger, internal_dict):
     target = debugger.CreateTarget(binp)
     target.BreakpointCreateByName("main")
     li = lldb.SBLaunchInfo(None)
+    # SBLaunchInfo enables eLaunchFlagDisableASLR by default, which makes LLDB
+    # call personality(ADDR_NO_RANDOMIZE). Docker's default seccomp profile
+    # rejects that call even though tracing a direct child is allowed. Clear
+    # only that flag so visualization works without extra container privileges.
+    li.SetLaunchFlags(li.GetLaunchFlags() & ~lldb.eLaunchFlagDisableASLR)
     li.SetWorkingDirectory(workdir)
     li.AddOpenFileAction(0, stdin_file, True, False)
     li.AddOpenFileAction(1, stdout_file, False, True)
     li.AddOpenFileAction(2, stdout_file, False, True)
     err = lldb.SBError()
     process = target.Launch(li, err)
+    launch_error = err.GetCString() if err.Fail() else ""
 
     steps = []
     crashed = False
@@ -232,4 +238,5 @@ def __lldb_init_module(debugger, internal_dict):
         json.dump({"steps": steps, "exit": exit_code, "crashed": crashed,
                    "crash_reason": crash_reason, "stdout": final_out,
                    "waiting_input": waiting_input,
-                   "truncated": n >= MAX_STEPS}, f)
+                   "truncated": n >= MAX_STEPS,
+                   "error": launch_error}, f)
