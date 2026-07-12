@@ -9,6 +9,7 @@ import select
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -33,6 +34,35 @@ UPDATE_CACHE = {"checked_at": 0.0, "value": None}
 UPDATE_CACHE_LOCK = threading.Lock()
 # clang-format: bare binary on Linux, xcrun wrapper on macOS
 CLANG_FORMAT = ["clang-format"] if shutil.which("clang-format") else ["xcrun", "clang-format"]
+SERVER_ENV_ALLOWLIST = {
+    "PATH", "LANG", "LC_ALL", "TZ", "HOME", "HOST", "PORT", "APP_VERSION",
+    "VERCEL", "VERCEL_ENV", "VERCEL_URL", "VERCEL_REGION", "VERCEL_TARGET_ENV",
+    "VERCEL_GIT_COMMIT_SHA",
+}
+
+
+def sanitized_server_env():
+    """Environment safe to expose through the compiler container's PID 1."""
+    return {key: value for key, value in os.environ.items()
+            if key in SERVER_ENV_ALLOWLIST}
+
+
+def maybe_reexec_with_sanitized_env():
+    """Replace the container process so /proc/1/environ contains no secrets."""
+    if (os.environ.get("CEDIT_SANITIZE_ENV") != "1" or
+            os.environ.get("CEDIT_ENV_CLEAN") == "1"):
+        return
+    env = sanitized_server_env()
+    env["CEDIT_ENV_CLEAN"] = "1"
+    os.execve(sys.executable,
+              [sys.executable, os.path.abspath(__file__), *sys.argv[1:]], env)
+
+
+def api_health():
+    """Runtime readiness used by Docker, Vercel, and deployment smoke tests."""
+    tools = {name: shutil.which(name) is not None
+             for name in ("gcc", "lldb", "clang-format")}
+    return {"ok": all(tools.values()), "version": APP_VERSION, "tools": tools}
 
 
 def semver(version):
@@ -144,6 +174,27 @@ with open(PRELUDE_FILE, "w") as _f:
 SESSIONS = {}                    # sid -> {"pid", "fd", "start", "dir"}
 SESSIONS_LOCK = threading.Lock()
 RUN_CAP = 120                    # ponytail: hard wall-clock cap; a run can't outlive this
+UNPRIVILEGED_UID = 65534         # nobody/nogroup in the Ubuntu container
+UNPRIVILEGED_GID = 65534
+
+
+def program_env(workdir):
+    """Small, non-secret environment inherited by submitted programs."""
+    env = {key: os.environ[key] for key in ("PATH", "LANG", "LC_ALL", "TZ")
+           if os.environ.get(key)}
+    env["HOME"] = workdir
+    return env
+
+
+def prepare_execution_dir(workdir):
+    """Let the unprivileged program use its workspace when the server is root."""
+    if os.geteuid() != 0:
+        return None
+    for root, dirs, files in os.walk(workdir):
+        os.chown(root, UNPRIVILEGED_UID, UNPRIVILEGED_GID)
+        for name in dirs + files:
+            os.chown(os.path.join(root, name), UNPRIVILEGED_UID, UNPRIVILEGED_GID)
+    return (UNPRIVILEGED_UID, UNPRIVILEGED_GID)
 
 
 def _reap(sess):
@@ -174,11 +225,17 @@ def api_start(body):
     if binp is None:
         shutil.rmtree(d, ignore_errors=True)
         return {"ok": False, "diags": diags}
+    identity = prepare_execution_dir(d)
     pid, fd = pty.fork()
     if pid == 0:                          # child: become the student's program
         try:
             os.chdir(d)
-            os.execv(binp, [binp])
+            if identity:
+                uid, gid = identity
+                os.setgroups([])
+                os.setgid(gid)
+                os.setuid(uid)
+            os.execve(binp, [binp], program_env(d))
         except Exception:
             os._exit(127)
     sid = uuid.uuid4().hex
@@ -226,13 +283,17 @@ def api_trace(body):
         stdin_file = os.path.join(d, "stdin.txt")
         with open(stdin_file, "w") as f:
             f.write(body.get("stdin", ""))
+        identity = prepare_execution_dir(d)
         out_file = os.path.join(d, "trace.json")
         reads_stdin = re.search(r'\b(scanf|fgets|getchar|getline|gets|getc|fgetc)\s*\(',
                                 "\n".join(files.values()))
         env = dict(os.environ,
                    TRACE_BIN=binp, TRACE_SRC="prog.c",
                    TRACE_OUT=out_file, TRACE_STDIN=stdin_file,
-                   TRACE_DETECT_EOF="1" if reads_stdin else "0")
+                   TRACE_DETECT_EOF="1" if reads_stdin else "0",
+                   TRACE_PROGRAM_ENV=json.dumps(program_env(d)),
+                   TRACE_UID=str(identity[0]) if identity else "",
+                   TRACE_GID=str(identity[1]) if identity else "")
         p = subprocess.run(
             ["lldb", "--batch", "--no-lldbinit",
              "-o", "command script import " + os.path.join(HERE, "trace_lldb.py")],
@@ -271,6 +332,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         path = urlparse(self.path).path
         if path == "/api/stream":
             return self.stream()
+        if path == "/api/health":
+            payload = api_health()
+            data = json.dumps(payload).encode()
+            self.send_response(200 if payload["ok"] else 503)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
         if path == "/api/update":
             data = json.dumps(api_update()).encode()
             self.send_response(200)
@@ -366,5 +437,6 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    maybe_reexec_with_sanitized_env()
     print(f"C editor -> http://localhost:{PORT}  (binding {HOST}:{PORT})")
     http.server.ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()

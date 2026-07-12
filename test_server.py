@@ -95,5 +95,40 @@ class TraceFailureTests(unittest.TestCase):
         self.assertIn("No executable lines", result["error"])
 
 
+class HealthCheckTests(unittest.TestCase):
+    def test_health_reports_required_tool_availability(self):
+        available = {"gcc": "/usr/bin/gcc", "lldb": "/usr/bin/lldb",
+                     "clang-format": None}
+        with patch.object(server.shutil, "which", side_effect=available.get):
+            result = server.api_health()
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["version"], server.APP_VERSION)
+        self.assertEqual(result["tools"], {
+            "gcc": True, "lldb": True, "clang-format": False,
+        })
+
+
+class ExecutionIsolationTests(unittest.TestCase):
+    def test_program_environment_excludes_server_secrets(self):
+        with patch.dict(server.os.environ, {
+            "PATH": "/usr/bin", "LANG": "C.UTF-8",
+            "VERCEL_OIDC_TOKEN": "secret",
+        }, clear=True):
+            result = server.program_env("/tmp/work")
+        self.assertEqual(result, {
+            "PATH": "/usr/bin", "LANG": "C.UTF-8", "HOME": "/tmp/work",
+        })
+
+    def test_server_environment_excludes_platform_credentials(self):
+        with patch.dict(server.os.environ, {
+            "PATH": "/usr/bin", "PORT": "80", "VERCEL": "1",
+            "VERCEL_OIDC_TOKEN": "secret", "DATABASE_URL": "secret-db",
+        }, clear=True):
+            result = server.sanitized_server_env()
+        self.assertEqual(result, {
+            "PATH": "/usr/bin", "PORT": "80", "VERCEL": "1",
+        })
+
+
 if __name__ == "__main__":
     unittest.main()

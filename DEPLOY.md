@@ -1,7 +1,71 @@
 # Deploy
 
 Single Docker image serves frontend + backend (gcc, lldb, clang-format).
-**Not Vercel** — serverless can't run a compiler or a debugger (needs ptrace).
+
+## Vercel protected preview
+
+Vercel supports container-backed Functions and detects `Dockerfile.vercel` in the
+repository root. That image contains the complete GCC, LLDB, clang-format, and Python
+runtime and listens on Vercel's default container port (`80`).
+
+Before deploying, enable Deployment Protection in the Vercel project. This application
+executes arbitrary C and must not be exposed as an unrestricted public service.
+
+Deploy from the repository root:
+
+```sh
+vercel login
+vercel link
+vercel
+```
+
+After the preview passes the checks below, create the production deployment:
+
+```sh
+vercel --prod
+```
+
+Vercel can also build automatically after importing the GitHub repository. Leave the
+framework preset on automatic; `Dockerfile.vercel` is detected without a build command
+or output-directory setting.
+
+### Preview verification
+
+Replace the hostname with the URL printed by Vercel:
+
+For a protected deployment, authenticate these requests with a Vercel protection
+bypass secret or run the equivalent checks from an authenticated browser session.
+
+```sh
+DEPLOYMENT_URL=https://your-preview.vercel.app
+curl --fail "$DEPLOYMENT_URL/api/health"
+curl --fail -H 'Content-Type: application/json' \
+  --data '{"code":"int main(void) { return 0; }"}' \
+  "$DEPLOYMENT_URL/api/compile"
+curl --fail -H 'Content-Type: application/json' \
+  --data '{"code":"int main(void) { int x = 1; return x - 1; }"}' \
+  "$DEPLOYMENT_URL/api/trace"
+```
+
+The deployment is ready only when health reports all three tools, compile returns
+`"ok": true`, and trace returns at least one step. LLDB tracing depends on Vercel's
+container runtime allowing a process to trace its own child, so this must be verified
+on the actual preview before promoting it.
+
+Submitted programs receive a minimal environment and, when the container starts as
+root, run as the unprivileged `nobody` user. The server also re-executes itself with an
+allowlisted environment before accepting traffic, preventing submitted programs from
+recovering Vercel credentials through their own environment or `/proc/1/environ`. This
+reduces credential exposure but is not a complete sandbox.
+
+### Vercel runtime caveat
+
+Compile, format, and visualization are self-contained requests. Interactive Run uses an
+in-memory session followed by a separate event-stream request. Container Functions are
+stateless and autoscale, so interactive sessions are suitable only for a small protected
+preview and are not guaranteed when multiple instances are active. A public multi-user
+release should move each execution into Vercel Sandbox and persist the sandbox/session ID
+outside the Function process.
 
 ## Build & run
 
@@ -33,6 +97,8 @@ VPN / SSO). Do **not** put it on the open internet.
 
 ## Hosting
 
+- **Vercel** — deploys `Dockerfile.vercel` as a container-backed Function. Use a
+  protected preview for validation; use Vercel Sandbox before public multi-user access.
 - **Fly.io** — `fly launch` (uses this Dockerfile), Firecracker VMs allow child tracing.
   Put it behind Fly's auth or an `[http_service]` with access control.
 - **Railway / Render** — deploy the Dockerfile. Some hardened managed runners block all

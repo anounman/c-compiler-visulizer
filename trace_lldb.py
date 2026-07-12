@@ -152,6 +152,11 @@ def __lldb_init_module(debugger, internal_dict):
     # only that flag so visualization works without extra container privileges.
     li.SetLaunchFlags(li.GetLaunchFlags() & ~lldb.eLaunchFlagDisableASLR)
     li.SetWorkingDirectory(workdir)
+    program_env = json.loads(os.environ.get("TRACE_PROGRAM_ENV", "{}"))
+    li.SetEnvironmentEntries(["%s=%s" % item for item in program_env.items()], False)
+    if os.environ.get("TRACE_UID"):
+        li.SetGroupID(int(os.environ["TRACE_GID"]))
+        li.SetUserID(int(os.environ["TRACE_UID"]))
     li.AddOpenFileAction(0, stdin_file, True, False)
     li.AddOpenFileAction(1, stdout_file, False, True)
     li.AddOpenFileAction(2, stdout_file, False, True)

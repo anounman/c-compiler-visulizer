@@ -41,6 +41,23 @@ docker run --rm -p 127.0.0.1:8000:8000 anounman/c-editor:latest
 Docker images can declare their internal port but cannot force a host-port mapping.
 Use the Compose command above when you do not want to provide any run settings.
 
+## Vercel protected preview
+
+Vercel can build this repository as a container-backed Function using
+`Dockerfile.vercel`. Because the application executes arbitrary C, enable Vercel
+Deployment Protection before sharing a preview.
+
+```sh
+vercel login
+vercel link
+vercel
+```
+
+The Vercel image listens on `$PORT` (default `80`) and includes GCC, LLDB,
+clang-format, and Python. Verify `/api/health`, compilation, and visualization on the
+preview before promoting it with `vercel --prod`. See [DEPLOY.md](DEPLOY.md) for the
+smoke-test commands, runtime limitations, and the Vercel Sandbox migration boundary.
+
 ## Run locally
 
 Install the following tools and make sure they are available on `PATH`:
@@ -142,6 +159,9 @@ All endpoints accept JSON via `POST`.
 | `/api/format` | `code` | Formatted C source |
 | `/api/trace` | `code`, `stdin` | Execution steps, frames, memory state, output, and crash details |
 
+`GET /api/health` reports the embedded version and availability of GCC, LLDB, and
+clang-format for deployment readiness checks.
+
 ## Project structure
 
 | File | Description |
@@ -150,6 +170,8 @@ All endpoints accept JSON via `POST`.
 | `server.py` | Static HTTP server and compile, run, format, and trace endpoints |
 | `trace_lldb.py` | LLDB Python script that records execution state as JSON |
 | `Dockerfile` | Ubuntu image containing the full runtime toolchain |
+| `Dockerfile.vercel` | Vercel container Function image listening on `$PORT` |
+| `compose.yaml` | Fixed-port local Docker service |
 | `DEPLOY.md` | Container deployment notes and security guidance |
 
 ## Limits and security

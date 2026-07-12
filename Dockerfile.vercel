@@ -1,6 +1,7 @@
 FROM ubuntu:24.04
 
-# gcc (compile/run), lldb (step trace), clang-format (prettify), python3 (server)
+# Vercel builds this as a container-backed Function. Keep the complete teaching
+# toolchain in the image because compile, format, and trace requests use it at runtime.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         gcc libc6-dev lldb python3 clang-format ca-certificates \
     && rm -rf /var/lib/apt/lists/*
@@ -8,13 +9,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 COPY server.py trace_lldb.py index.html ./
 
-ARG APP_VERSION=dev
+ARG APP_VERSION=vercel
 ENV APP_VERSION=${APP_VERSION} \
     CEDIT_SANITIZE_ENV=1 \
     HOST=0.0.0.0 \
-    PORT=8000
-EXPOSE 8000
+    PORT=80
+EXPOSE 80
 HEALTHCHECK --interval=15s --timeout=3s --start-period=5s --retries=3 \
-    CMD ["python3", "-c", "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.environ.get('PORT', '8000') + '/api/health', timeout=2)"]
-# ponytail: no gunicorn/uvicorn — stdlib ThreadingHTTPServer is enough for a teaching tool
+    CMD ["python3", "-c", "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.environ.get('PORT', '80') + '/api/health', timeout=2)"]
+
 CMD ["python3", "server.py"]
