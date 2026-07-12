@@ -1,4 +1,6 @@
 .git
+.vercel
+.env*
 DEPLOY.md
 *.md
 scratchpad
