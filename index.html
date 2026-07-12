@@ -356,9 +356,9 @@ int main(void) {
     *second = (Node){scores[1], NULL};
 
     for (Node *current = first; current != NULL; current = current->next) {
-        printf("node value: %d\n", current->value);
+        printf("node value: %d\\n", current->value);
     }
-    printf("selected: %d, total: %d, board[1][2]: %d\n",
+    printf("selected: %d, total: %d, board[1][2]: %d\\n",
            *selected, total, board[1][2]);
 
     free(second);
@@ -367,12 +367,16 @@ int main(void) {
 }
 `;
 
+// Exact value stored by the briefly shipped demo whose C string escapes were
+// interpreted by this JavaScript template literal.
+const BROKEN_DEFAULT_C = DEFAULT_C.replace(/\\n/g, "\n");
+
 /* ---------- multiple files: prog.c fixed, others (.h/.c/.txt) come and go ---------- */
 let files = null, curFile = "prog.c";
 try { files = JSON.parse(localStorage.getItem("cfiles")); } catch {}
 if (!files || typeof files !== "object" || typeof files["prog.c"] !== "string")
   files = { "prog.c": localStorage.getItem("csrc") || DEFAULT_C };  // migrate old single-file storage
-if (files["prog.c"] === PREVIOUS_DEFAULT_C) {
+if (files["prog.c"] === PREVIOUS_DEFAULT_C || files["prog.c"] === BROKEN_DEFAULT_C) {
   files["prog.c"] = DEFAULT_C;  // upgrade untouched old demo without replacing user code
   localStorage.setItem("cfiles", JSON.stringify(files));
 }
