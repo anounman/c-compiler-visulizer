@@ -1,1 +1,9 @@
-{}
+{
+  "name": "c-compiler-visualizer",
+  "version": "1.0.0",
+  "description": "C Compiler Visualizer",
+  "private": true,
+  "dependencies": {
+    "@vercel/analytics": "^1.4.1"
+  }
+}
