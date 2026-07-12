@@ -302,7 +302,7 @@ splitterEl.addEventListener("pointercancel", e => {
 });
 window.addEventListener("resize", applySplit);
 
-const DEFAULT_C = `#include <stdio.h>
+const PREVIOUS_DEFAULT_C = `#include <stdio.h>
 
 int main(void) {
     int a = 5;
@@ -316,11 +316,66 @@ int main(void) {
 }
 `;
 
+const DEFAULT_C = `#include <stdio.h>
+#include <stdlib.h>
+
+typedef struct Node {
+    int value;
+    struct Node *next;
+} Node;
+
+int sum(const int values[], int count) {
+    int total = 0;
+    for (int i = 0; i < count; i++) {
+        total += values[i];
+    }
+    return total;
+}
+
+void add_bonus(int *score) {
+    *score += 5;
+}
+
+int main(void) {
+    int scores[4] = {10, 20, 30, 40};
+    int board[2][3] = {{1, 2, 3}, {4, 5, 6}};
+
+    int *selected = &scores[1];
+    add_bonus(selected);
+    int total = sum(scores, 4);
+
+    Node *first = malloc(sizeof *first);
+    Node *second = malloc(sizeof *second);
+    if (first == NULL || second == NULL) {
+        free(first);
+        free(second);
+        return 1;
+    }
+
+    *first = (Node){scores[0], second};
+    *second = (Node){scores[1], NULL};
+
+    for (Node *current = first; current != NULL; current = current->next) {
+        printf("node value: %d\n", current->value);
+    }
+    printf("selected: %d, total: %d, board[1][2]: %d\n",
+           *selected, total, board[1][2]);
+
+    free(second);
+    free(first);
+    return 0;
+}
+`;
+
 /* ---------- multiple files: prog.c fixed, others (.h/.c/.txt) come and go ---------- */
 let files = null, curFile = "prog.c";
 try { files = JSON.parse(localStorage.getItem("cfiles")); } catch {}
 if (!files || typeof files !== "object" || typeof files["prog.c"] !== "string")
   files = { "prog.c": localStorage.getItem("csrc") || DEFAULT_C };  // migrate old single-file storage
+if (files["prog.c"] === PREVIOUS_DEFAULT_C) {
+  files["prog.c"] = DEFAULT_C;  // upgrade untouched old demo without replacing user code
+  localStorage.setItem("cfiles", JSON.stringify(files));
+}
 ta.value = files[curFile];
 
 const isC = n => /\.[ch]$/.test(n);
