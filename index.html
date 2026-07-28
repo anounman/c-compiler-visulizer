@@ -147,7 +147,7 @@
            font:12px var(--mono); }
   #vizin:disabled { opacity:.4; }
   #mem { position:relative; flex:1; overflow:auto; }
-  #arrows { position:absolute; inset:0; pointer-events:none; overflow:visible; }
+  #arrows { position:absolute; inset:0; z-index:3; pointer-events:none; overflow:visible; }
   .frame { border:1px solid var(--border); border-radius:6px; margin-bottom:10px;
            background:var(--panel); }
   .frame.top { border-color:#3794ff; }
@@ -169,10 +169,38 @@
               outline:1px solid #e5c07b; color:#e5c07b; }
   #memhint { color:#6e7681; font-size:12px; padding:20px; }
 
-  /* heap nodes (linked lists, trees, malloc'd data) */
+  /* detected data structures + heap nodes */
   .heaphdr { font-size:11px; color:#9d9d9d; margin:6px 0 4px; text-transform:uppercase; }
-  #heap { display:flex; flex-wrap:wrap; gap:26px 46px; align-items:flex-start; padding:6px 4px 16px; }
-  .hnode { border:1.5px solid #61afef; border-radius:6px; background:#2a2d3a; min-width:110px; }
+  #heap { display:block; padding:2px 2px 16px; }
+  .structure-group { width:max-content; min-width:calc(100% - 4px); margin:8px 0 12px;
+                     border:1px solid #30343b; border-radius:8px; background:#181a1f;
+                     box-sizing:border-box; overflow:visible; }
+  .structure-head { height:34px; display:flex; align-items:center; gap:8px; padding:0 10px;
+                    border-bottom:1px solid #30343b; box-sizing:border-box; }
+  .structure-kind { border:1px solid rgba(97,175,239,.48); border-radius:999px;
+                    background:rgba(97,175,239,.10); color:#8fc8f4; padding:2px 8px;
+                    font:600 10px var(--mono); text-transform:uppercase; letter-spacing:.04em; }
+  .structure-detail { color:#858b94; font:10px var(--mono); }
+  .structure-canvas { position:relative; box-sizing:border-box; }
+  .structure-node { position:absolute; width:174px; z-index:2; }
+  .structure-marker { position:absolute; left:50%; top:-21px; transform:translateX(-50%);
+                      max-width:160px; overflow:hidden; text-overflow:ellipsis;
+                      color:#e5c07b; font:10px var(--mono); white-space:nowrap; }
+  .structure-marker::after { content:""; display:block; width:1px; height:5px;
+                             margin:2px auto 0; background:#e5c07b; opacity:.7; }
+  .structure-group[data-layout="tree"] .structure-kind {
+                    border-color:rgba(152,195,121,.52); color:#a9d38c;
+                    background:rgba(152,195,121,.10); }
+  .structure-group[data-layout="list"] .structure-kind,
+  .structure-group[data-layout="queue"] .structure-kind,
+  .structure-group[data-layout="stack"] .structure-kind {
+                    border-color:rgba(198,120,221,.5); color:#d49be6;
+                    background:rgba(198,120,221,.10); }
+  .structure-group.released { opacity:.62; }
+  .released-row { display:flex; gap:22px; padding:20px 18px; align-items:flex-start; }
+  .released-row .hnode { width:174px; }
+  .hnode { border:1.5px solid #61afef; border-radius:6px; background:#2a2d3a;
+           min-width:110px; box-sizing:border-box; }
   .hnode.dead { opacity:.32; border-style:dashed; filter:grayscale(.6); }
   .hnode .hhead { font:10px var(--mono); color:#61afef; padding:3px 8px;
                   border-bottom:1px solid #3c3c3c; }
@@ -182,6 +210,15 @@
   .hnode .hfn { color:#9cdcfe; }
   .hnode .hfv { color:#b5cea8; }
   .hnode .hval { padding:5px 8px; font:13px var(--mono); color:#b5cea8; }
+  .ds-label { display:flex; align-items:center; gap:5px; margin-top:5px; color:#858b94;
+              font:9px var(--mono); text-transform:uppercase; letter-spacing:.04em; }
+  .ds-label::before { content:""; width:5px; height:5px; border-radius:50%; background:#56b6c2; }
+  .linear-controls { display:flex; flex-wrap:wrap; gap:4px; margin-top:5px; }
+  .linear-control { border:1px solid #454a52; border-radius:999px; padding:1px 5px;
+                    color:#aeb4bd; font:9px var(--mono); }
+  .mgrid .cellmarker { border:0; height:13px; padding:0 2px 2px; color:#e5c07b;
+                       font:8px var(--mono); text-align:center; white-space:nowrap; }
+  #arrows path { stroke-linecap:round; stroke-linejoin:round; }
 </style>
 </head>
 <body>
@@ -228,7 +265,7 @@
       <div id="vizout"></div>
       <div id="vizinrow"><input id="vizin" placeholder="program input — type when the trace stops waiting, press Enter" disabled></div>
       <div id="mem"><div id="memhint">Click 👁 Visualize to step through your program and watch variables & pointers.</div></div>
-      <div id="legend">highlighted line = runs next · gold glow = just changed · pointer arrow: ● = the pointer, ▶ = what it points to (hover a pointer to spotlight its arrow) · faded box = freed memory</div>
+      <div id="legend">structures are detected automatically · highlighted line = runs next · gold glow = just changed · pointer arrow: ● = the pointer, ▶ = what it points to (hover a pointer to spotlight its arrow) · faded box = freed memory</div>
     </div>
   </div>
 </div>
@@ -253,6 +290,7 @@
   </div>
 </aside>
 
+<script src="visualizer-layout.js"></script>
 <script>
 "use strict";
 const $ = id => document.getElementById(id);
@@ -782,12 +820,19 @@ $("vizin").addEventListener("keydown", e => {
 const short = s => /^0x[0-9a-fA-F]{7,}$/.test(s) ? "…" + s.slice(-4) : s;
 
 // 1D array -> single row of cells; 2D array / array of structs -> full grid with indices
-function grid(children) {
-  const cell = c => `<td data-addr="${norm(c.addr) || ""}" ${c.ptr ? `data-ptr="${norm(c.ptr)}"` : ""}
+function grid(children, markers = {}) {
+  const cell = c => {
+    const ptr = c.ptr ? norm(c.ptr) : null;
+    return `<td data-addr="${norm(c.addr) || ""}" ${ptr ? `data-ptr="${ptr}"` : ""}
     title="${esc(c.name)} = ${esc(String(c.value))}">${esc(short(String(c.value)))}</td>`;
+  };
   const is2d = children.some(c => c.children);
   if (!is2d) {
-    return `<table class="mgrid"><tr>${children.map(c => `<td class="idx">${esc(c.name)}</td>`).join("")}</tr>
+    const markerRow = Object.keys(markers).length
+      ? `<tr>${children.map((c, index) =>
+          `<td class="cellmarker">${esc((markers[index] || []).join(" · "))}</td>`).join("")}</tr>`
+      : "";
+    return `<table class="mgrid">${markerRow}<tr>${children.map(c => `<td class="idx">${esc(c.name)}</td>`).join("")}</tr>
             <tr>${children.map(cell).join("")}</tr></table>`;
   }
   const cols = Math.max(...children.map(c => (c.children || []).length));
@@ -797,14 +842,38 @@ function grid(children) {
     `</table>`;
 }
 
+function linearContents(linear) {
+  const storage = linear.storage;
+  const cells = (storage && storage.children) || [];
+  const markers = {};
+  for (const control of linear.controls || []) {
+    if (linear.kind === "stack" && !/\b(top|sp)\b/i.test(control.name)) continue;
+    if (linear.kind === "queue" && !/\b(front|head|rear|tail|back)\b/i.test(control.name)) continue;
+    const index = parseInt(control.value, 10);
+    if (!Number.isNaN(index) && index >= 0 && index < cells.length) {
+      if (!markers[index]) markers[index] = [];
+      markers[index].push(control.name.toUpperCase());
+    }
+  }
+  const controls = (linear.controls || []).map(control =>
+    `<span class="linear-control">${esc(control.name)} = ${esc(short(String(control.value)))}</span>`).join("");
+  return (cells.length ? grid(cells, markers) : "") +
+    (controls ? `<div class="linear-controls">${controls}</div>` : "");
+}
+
 function varBox(v, color) {
   const na = norm(v.addr);
   const ptr = v.ptr ? norm(v.ptr) : null;
+  const linear = StructureViz.classifyLinearVariable(v);
   let h = `<div class="vbox" data-addr="${na || ""}" ${ptr ? `data-ptr="${ptr}"` : ""}
        ${color ? `style="border-color:${color}"` : ""}>`;
   h += `<span class="vn">${esc(v.name)}</span> <span class="vt">${esc(v.type)}</span>`;
+  if (linear)
+    h += `<div class="ds-label">${esc(linear.label)} · ordered cells</div>`;
   if (v.children) {
-    h += grid(v.children);
+    h += linear && ["stack", "queue"].includes(linear.kind)
+      ? linearContents(linear)
+      : grid(v.children);
   } else {
     let val = short(String(v.value));
     if (v.ptr && v.pointee !== undefined && !v.pointee.startsWith?.("0x")) val += ` → ${v.pointee}`;
@@ -818,16 +887,69 @@ function heapNode(addr, node, live) {
   let h = `<div class="hnode ${live ? "" : "dead"}" data-addr="${norm(addr)}">
     <div class="hhead">${esc(node.type)} @ ${short(addr)}${live ? "" : " (freed/unreachable)"}</div>`;
   if (node.children) {
-    h += node.children.map(c =>
-      `<div class="hf" data-addr="${norm(c.addr) || ""}" ${c.ptr && parseInt(c.ptr, 16) ? `data-ptr="${norm(c.ptr)}"` : ""}>
+    h += node.children.map(c => {
+      const ptr = c.ptr ? norm(c.ptr) : null;
+      return `<div class="hf" data-addr="${norm(c.addr) || ""}" data-field="${esc(String(c.name))}"
+          ${ptr ? `data-ptr="${ptr}"` : ""}>
          <span class="hfn">${esc(c.name)}</span>
          ${c.children ? grid(c.children)
            : `<span class="hfv" title="${esc(String(c.value))}">${esc(short(String(c.value)))}</span>`}
-       </div>`).join("");
+       </div>`;
+    }).join("");
   } else {
     h += `<div class="hval">${esc(String(node.value))}</div>`;
   }
   return h + `</div>`;
+}
+
+function structureMarker(component, address) {
+  const refs = (component.rootRefs.get(address) || [])
+    .map(ref => ref.name)
+    .filter(name => /(^|\.)(root|head|first|front|rear|tail|top)$/i.test(name));
+  if (!refs.length && address === component.root) refs.push("root");
+  return refs.slice(0, 2).join(" · ");
+}
+
+function structureGroup(component) {
+  const layout = StructureViz.layoutComponent(component);
+  const classification = component.classification;
+  const nodes = component.addresses.map(address => {
+    const position = layout.positions[address];
+    const marker = structureMarker(component, address);
+    return `<div class="structure-node" style="left:${position.x}px;top:${position.y}px">
+      ${marker ? `<div class="structure-marker">${esc(marker)}</div>` : ""}
+      ${heapNode(address, component.nodes[address], true)}
+    </div>`;
+  }).join("");
+  const rootNames = component.addresses.flatMap(address =>
+    (component.rootRefs.get(address) || [])
+      .map(ref => ref.name)
+      .filter(name => /(^|\.)(root|head|first|front|rear|tail|top)$/i.test(name)));
+  const detail = `${component.addresses.length} node${component.addresses.length === 1 ? "" : "s"}` +
+    (rootNames.length ? ` · ${rootNames.slice(0, 3).join(", ")}` : "");
+  return `<section class="structure-group" data-layout="${classification.kind}">
+    <div class="structure-head">
+      <span class="structure-kind">${esc(classification.label)}</span>
+      <span class="structure-detail">${esc(detail)}</span>
+    </div>
+    <div class="structure-canvas" style="width:${layout.width}px;height:${layout.height}px">${nodes}</div>
+  </section>`;
+}
+
+function renderHeap(snapshot, frames) {
+  const analysis = StructureViz.analyzeHeap(snapshot, frames, heapSeq);
+  const live = analysis.components.map(structureGroup).join("");
+  const released = analysis.released.length
+    ? `<section class="structure-group released">
+        <div class="structure-head">
+          <span class="structure-kind">Released memory</span>
+          <span class="structure-detail">${analysis.released.length} allocation${analysis.released.length === 1 ? "" : "s"}</span>
+        </div>
+        <div class="released-row">${analysis.released.map(item =>
+          heapNode(item.address, item.node, false)).join("")}</div>
+       </section>`
+    : "";
+  return live + released;
 }
 
 // plain-English "what just happened" line, built by diffing this step against the previous
@@ -889,9 +1011,8 @@ function showStep(i) {
     if (v.ptr) colors[f.func + "." + v.name] = PALETTE[ci++ % PALETTE.length];
   const snap = heapSnap[cur] || {};
   const heapHtml = Object.keys(snap).length
-    ? `<div class="heaphdr">HEAP — memory made by malloc/calloc (arrows show which pointer owns what)</div><div id="heap">` +
-      Object.entries(snap).sort((a, b) => heapSeq[a[0]] - heapSeq[b[0]])
-        .map(([a, e]) => heapNode(a, e.node, e.live)).join("") + `</div>`
+    ? `<div class="heaphdr">DATA STRUCTURES — detected from live pointers and memory</div>
+       <div id="heap">${renderHeap(snap, st.frames)}</div>`
     : "";
   $("mem").innerHTML = `<svg id="arrows"></svg>` +
     `<div class="heaphdr">STACK — each box below = one function that is currently running, with its variables</div>` +
@@ -930,6 +1051,9 @@ function showStep(i) {
   });
   prevCells = nowCells;
   drawArrows(colors, st);
+  requestAnimationFrame(() => {
+    if (trace && trace.steps[cur] === st) drawArrows(colors, st);
+  });
 }
 
 function drawArrows(colors, st) {
@@ -943,21 +1067,55 @@ function drawArrows(colors, st) {
     if (!tb) return;  // ponytail: no visual for unmatched pointers — the box already shows the raw address
     const color = pb.style.borderColor || "#61afef";
     const pr = pb.getBoundingClientRect();
-    const x1 = pr.right - mr.left + mem.scrollLeft, y1 = pr.top + pr.height / 2 - mr.top + mem.scrollTop;
     const tr = tb.getBoundingClientRect();
-    const y2 = tr.top - mr.top + mem.scrollTop + Math.min(tr.height / 2, 14);
-    let x2, d, head;
-    if (tr.left - mr.left + mem.scrollLeft > x1 + 12) {
-      // target to the right (typical linked-list chain): source right → target left edge
-      x2 = tr.left - mr.left + mem.scrollLeft;
-      d = `M ${x1} ${y1} C ${x1 + 24} ${y1}, ${x2 - 24} ${y2}, ${x2 - 9} ${y2}`;
-      head = `M ${x2 - 1} ${y2} l -9 -4.5 l 0 9 z`;   // ▶ into the left edge
+    const sourceGroup = pb.closest(".structure-group");
+    const targetGroup = tb.closest(".structure-group");
+    const layout = sourceGroup && sourceGroup === targetGroup
+      ? sourceGroup.getAttribute("data-layout")
+      : "";
+    const sx = value => value - mr.left + mem.scrollLeft;
+    const sy = value => value - mr.top + mem.scrollTop;
+    let x1, y1, x2, y2, d, head;
+
+    if (layout === "tree" || layout === "stack") {
+      // Parent/child and stack links always flow downward.
+      x1 = sx(pr.left + pr.width / 2); y1 = sy(pr.bottom);
+      x2 = sx(tr.left + tr.width / 2); y2 = sy(tr.top);
+      const bend = Math.max(24, (y2 - y1) * .45);
+      d = `M ${x1} ${y1} C ${x1} ${y1 + bend}, ${x2} ${y2 - bend}, ${x2} ${y2 - 9}`;
+      head = `M ${x2} ${y2 - 1} l -4.5 -9 l 9 0 z`;
+    } else if (layout === "list" || layout === "queue") {
+      const targetIsRight = tr.left > pr.right;
+      y1 = sy(pr.top + pr.height / 2);
+      y2 = sy(tr.top + Math.min(tr.height / 2, 14));
+      if (targetIsRight) {
+        x1 = sx(pr.right); x2 = sx(tr.left);
+        d = `M ${x1} ${y1} C ${x1 + 24} ${y1}, ${x2 - 24} ${y2}, ${x2 - 9} ${y2}`;
+        head = `M ${x2 - 1} ${y2} l -9 -4.5 l 0 9 z`;
+      } else {
+        // Back-links and circular tails use a rail below the list instead of
+        // cutting through every node between source and target.
+        x1 = sx(pr.left); x2 = sx(tr.right);
+        const rail = sy(Math.max(pr.bottom, tr.bottom)) + 24 + (ai % 3) * 8;
+        d = `M ${x1} ${y1} C ${x1 - 18} ${y1}, ${x1 - 18} ${rail}, ${x1 - 36} ${rail}
+             L ${x2 + 36} ${rail}
+             C ${x2 + 18} ${rail}, ${x2 + 18} ${y2}, ${x2 + 9} ${y2}`;
+        head = `M ${x2 + 1} ${y2} l 9 -4.5 l 0 9 z`;
+      }
+    } else if (tr.top > pr.bottom + 20) {
+      // Stack roots usually point into a detected structure below them.
+      x1 = sx(pr.left + pr.width / 2); y1 = sy(pr.bottom);
+      x2 = sx(tr.left + tr.width / 2); y2 = sy(tr.top);
+      const bend = Math.max(28, (y2 - y1) * .35);
+      d = `M ${x1} ${y1} C ${x1} ${y1 + bend}, ${x2} ${y2 - bend}, ${x2} ${y2 - 9}`;
+      head = `M ${x2} ${y2 - 1} l -4.5 -9 l 9 0 z`;
     } else {
-      // target left/above/below: loop around via the right side
-      x2 = tr.right - mr.left + mem.scrollLeft;
+      // Generic object graphs retain flexible side routing.
+      x1 = sx(pr.right); y1 = sy(pr.top + pr.height / 2);
+      x2 = sx(tr.right); y2 = sy(tr.top + Math.min(tr.height / 2, 14));
       const bend = 34 + Math.min(40, Math.abs(y2 - y1) / 6);
       d = `M ${x1} ${y1} C ${x1 + bend} ${y1}, ${x2 + bend} ${y2}, ${x2 + 9} ${y2}`;
-      head = `M ${x2 + 1} ${y2} l 9 -4.5 l 0 9 z`;    // ◀ into the right edge
+      head = `M ${x2 + 1} ${y2} l 9 -4.5 l 0 9 z`;
     }
     // dot = where the pointer variable lives, arrowhead = the memory it points to
     pb.setAttribute("data-ai", ai);

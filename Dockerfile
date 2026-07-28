@@ -6,7 +6,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY server.py trace_lldb.py index.html ./
+COPY server.py trace_lldb.py index.html visualizer-layout.js ./
 
 ARG APP_VERSION=dev
 ENV APP_VERSION=${APP_VERSION} \

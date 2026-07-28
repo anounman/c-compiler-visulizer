@@ -11,7 +11,9 @@ The frontend is a single HTML file and the backend uses only Python's standard l
 - Source formatting through clang-format
 - Line-by-line execution playback with play, pause, step, scrub, and breakpoint controls
 - Stack-frame and in-scope local-variable inspection
-- Visualizations for arrays, matrices, structs, pointers, linked structures, and heap memory
+- Automatic data-structure detection with specialized layouts for trees, linked
+  lists, arrays, matrices, stacks, and queues
+- Generic object-graph fallback for ambiguous or mixed pointer structures
 - Pointer arrows, changed-value highlighting, and crash reporting
 - Source persisted locally in the browser
 - No frontend build step or third-party Python packages
@@ -167,8 +169,10 @@ clang-format for deployment readiness checks.
 | File | Description |
 | --- | --- |
 | `index.html` | Editor, output panel, trace playback, and memory visualization |
+| `visualizer-layout.js` | Data-structure detection and deterministic semantic layouts |
 | `server.py` | Static HTTP server and compile, run, format, and trace endpoints |
 | `trace_lldb.py` | LLDB Python script that records execution state as JSON |
+| `test_visualizer.js` | Detector and layout tests using Node's built-in test runner |
 | `Dockerfile` | Ubuntu image containing the full runtime toolchain |
 | `Dockerfile.vercel` | Vercel container Function image listening on `$PORT` |
 | `compose.yaml` | Fixed-port local Docker service |
@@ -188,6 +192,12 @@ Current safeguards and visualization limits include:
 - A trace records at most 400 debugger steps.
 - Aggregate displays are capped at 24 children per level.
 - Pointer traversal is capped at 12 levels.
+
+Run the frontend detector/layout tests with:
+
+```sh
+node --test test_visualizer.js
+```
 
 These bounds keep the teaching UI responsive; they are not a security sandbox.
 
