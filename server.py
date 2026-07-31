@@ -383,7 +383,8 @@ def api_trace(body):
                    TRACE_GID=str(identity[1]) if identity else "")
         p = subprocess.run(
             ["lldb", "--batch", "--no-lldbinit",
-             "-o", "command script import " + os.path.join(HERE, "trace_lldb.py")],
+             "-o", "command script import " + os.path.join(HERE, "trace_lldb.py"),
+             "-o", "quit"],
             env=env, capture_output=True, text=True, timeout=TRACE_TIMEOUT)
         if not os.path.exists(out_file):
             return {"ok": False, "diags": diags,
