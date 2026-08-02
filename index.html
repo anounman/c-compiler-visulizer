@@ -75,6 +75,12 @@
   body.resizing { cursor:col-resize; user-select:none; }
   #right { flex:1 1 auto; display:flex; flex-direction:column; min-width:240px; }
 
+  /* vertical resize handle for the memory / data-structures view */
+  #memsplit { flex:0 0 7px; background:var(--border); cursor:row-resize; position:relative; border-radius:3px; }
+  #memsplit::before { content:""; position:absolute; inset:0 3px; background:#555; opacity:.45; border-radius:2px; }
+  #memsplit:hover, body.row-resizing #memsplit { background:#4a4a4a; }
+  body.row-resizing { cursor:row-resize; user-select:none; }
+
   /* editor */
   #gutter { width:48px; padding:8px 0; background:var(--panel); overflow:hidden;
             text-align:right; font:13px/20px var(--mono); color:#6e7681; flex:none; }
@@ -264,6 +270,7 @@
       <div id="narr"></div>
       <div id="vizout"></div>
       <div id="vizinrow"><input id="vizin" placeholder="program input — type when the trace stops waiting, press Enter" disabled></div>
+      <div id="memsplit" title="Drag to resize the data-structures / memory view"></div>
       <div id="mem"><div id="memhint">Click 👁 Visualize to step through your program and watch variables & pointers.</div></div>
       <div id="legend">structures are detected automatically · highlighted line = runs next · gold glow = just changed · pointer arrow: ● = the pointer, ▶ = what it points to (hover a pointer to spotlight its arrow) · faded box = freed memory</div>
     </div>
@@ -339,6 +346,54 @@ splitterEl.addEventListener("pointercancel", e => {
   document.body.classList.remove("resizing");
 });
 window.addEventListener("resize", applySplit);
+
+/* ---------- resizable memory / data-structures view ---------- */
+const mempaneEl = $("mempane"), memEl = $("mem"), memSplitEl = $("memsplit");
+const MEM_MIN = 140;
+function memMax() { return Math.max(MEM_MIN + 40, mempaneEl.clientHeight - 200); }
+function applyMemHeight(px) {
+  const max = memMax();
+  return Math.min(Math.max(px, MEM_MIN), max);
+}
+function setMemHeight(px, persist) {
+  px = applyMemHeight(px);
+  memEl.style.flex = "0 0 " + px + "px";
+  if (persist) localStorage.setItem("memHeight", String(Math.round(px)));
+}
+(function restoreMem() {
+  const saved = parseFloat(localStorage.getItem("memHeight"));
+  if (saved && saved >= MEM_MIN) memEl.style.flex = "0 0 " + saved + "px";
+})();
+memSplitEl.addEventListener("dblclick", () => {
+  memEl.style.flex = "";                       // back to flex:1 (auto fill)
+  localStorage.removeItem("memHeight");
+});
+memSplitEl.addEventListener("pointerdown", e => {
+  e.preventDefault();
+  memSplitEl.setPointerCapture(e.pointerId);
+  document.body.classList.add("row-resizing");
+  const start = memEl.getBoundingClientRect().height;
+  const y0 = e.clientY;
+  function move(ev) {
+    setMemHeight(start + (ev.clientY - y0), true);
+  }
+  function up(ev) {
+    memSplitEl.releasePointerCapture(ev.pointerId);
+    document.body.classList.remove("row-resizing");
+    memSplitEl.removeEventListener("pointermove", move);
+    memSplitEl.removeEventListener("pointerup", up);
+    memSplitEl.removeEventListener("pointercancel", up);
+  }
+  memSplitEl.addEventListener("pointermove", move);
+  memSplitEl.addEventListener("pointerup", up);
+  memSplitEl.addEventListener("pointercancel", up);
+});
+// clamp a restored height when the pane becomes visible / window resizes
+window.addEventListener("resize", () => {
+  if (mempaneEl.clientHeight === 0) return;   // memory tab hidden — no layout yet
+  const saved = parseFloat(localStorage.getItem("memHeight"));
+  if (saved && saved >= MEM_MIN) setMemHeight(saved, true);
+});
 
 const PREVIOUS_DEFAULT_C = `#include <stdio.h>
 
